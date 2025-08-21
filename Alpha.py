@@ -629,7 +629,7 @@ def main_app():
         if not st.session_state.options_loaded:
             if st.button("Load Options Chain"):
                 st.session_state.options_loaded = True
-                st.experimental_rerun()
+                st.rerun()
 
         if st.session_state.options_loaded:
             sorted_expirations, contract_data = get_all_contract_info_free(st.session_state.get('ticker', 'N/A'))
@@ -774,4 +774,5 @@ def main_app():
 
 # --- APP ROUTING (NEW CODE) ---
 if check_login():
+
     main_app()
