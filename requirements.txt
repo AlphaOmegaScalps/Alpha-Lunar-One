@@ -1,7 +1,7 @@
-streamlit==1.19.0
-pandas==1.5.3
-plotly==5.9.0
-ephem==4.1.4
-polygon-api-client==1.15.3
-google-generativeai==0.8.5
-Pillow==11.3.0
+streamlit
+pandas
+plotly
+ephem
+polygon-api-client
+google-generativeai
+Pillow
