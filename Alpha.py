@@ -17,6 +17,8 @@ import streamlit.components.v1 as components
 # --- Page Configuration (MUST be the first Streamlit command) ---
 st.set_page_config(page_title="The Alpha - Simplifying Your Trading", layout="wide", page_icon="📈")
 
+
+
 # --- USER AUTHENTICATION ---
 def check_login():
     """Checks if the user is logged in."""
@@ -27,7 +29,7 @@ def check_login():
 
 
 def show_login_form():
-    """Displays a login form using Streamlit secrets."""
+    """Displays a login form using Streamlit Secrets."""
     with st.form("login_form"):
         st.title("The Alpha Login")
         username = st.text_input("Username").lower().strip()
@@ -48,7 +50,7 @@ def show_login_form():
                 st.error("Login credentials are not configured in Streamlit Secrets.")
 
 
-# --- MAIN APPLICATION ---
+# --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
 
 def get_eclipse_calendar_data():
     """NASA eclipse calendar data for the Eclipses page and future market studies."""
@@ -176,7 +178,7 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
     all_study_eclipses = get_historical_eclipse_study_data(start_ts, end_ts)
     chart_eclipses = all_study_eclipses.copy()
 
-    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+    filter_col1, filter_col2, filter_col3, filter_col4, filter_col5, filter_col6 = st.columns(6)
     with filter_col1:
         show_solar = st.checkbox("Show Solar Verticals", value=True, key="eclipse_show_solar")
     with filter_col2:
@@ -184,10 +186,22 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
     with filter_col3:
         show_phase_overlay = st.checkbox("Show % Delta Overlay", value=True, key="eclipse_show_delta_overlay")
     with filter_col4:
-        num_eclipse_price_levels = st.number_input(
-            "Show Price Levels for Last X Eclipses", min_value=0, max_value=20, value=2, step=1,
-            key="eclipse_num_price_levels"
+        show_fib_time_zones = st.checkbox(
+            "Show 1/3 & 2/3 Time Zones", value=True, key="eclipse_show_fib_time_zones"
         )
+    with filter_col5:
+        show_future_fib_signals = st.checkbox(
+            "Show Future Third Signals", value=True, key="eclipse_show_future_fib_signals"
+        )
+    with filter_col6:
+        show_third_behavior = st.checkbox(
+            "Measure 1/3 Price Behavior", value=True, key="eclipse_show_third_behavior"
+        )
+
+    num_eclipse_price_levels = st.number_input(
+        "Show Price Levels for Last X Eclipses", min_value=0, max_value=20, value=2, step=1,
+        key="eclipse_num_price_levels"
+    )
 
     # Load only through the selected study end. Future eclipses are markers only;
     # no nonexistent future price data is requested.
@@ -307,6 +321,44 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
                 bgcolor="rgba(13,18,25,0.55)", borderpad=3
             )
 
+    # Fibonacci-style time zones: divide each SAME-BODY eclipse-to-eclipse
+    # interval into thirds. The two internal time zones are exactly 1/3 and 2/3
+    # of the elapsed calendar time from one eclipse to the next. This creates two
+    # additional cycle markers inside every larger Solar-to-Solar and Lunar-to-Lunar
+    # cycle without changing the underlying eclipse dates or price calculations.
+    #
+    # We use calendar time here because the eclipse cycle is defined by the actual
+    # eclipse dates, not by trading-session count. The markers can therefore be
+    # compared directly with the astronomical cycle boundaries.
+    if show_fib_time_zones and event_points:
+        for body in ("Solar", "Lunar"):
+            if body == "Solar" and not show_solar:
+                continue
+            if body == "Lunar" and not show_lunar:
+                continue
+
+            body_events = [e for e in event_points if e["body"] == body]
+            for start_event, end_event in zip(body_events[:-1], body_events[1:]):
+                start_x = pd.Timestamp(start_event["calendar_date"]).normalize()
+                end_x = pd.Timestamp(end_event["calendar_date"]).normalize()
+                span = end_x - start_x
+                if span <= pd.Timedelta(0):
+                    continue
+
+                color = colors[body]
+                for fraction, label in ((1/3, "1/3"), (2/3, "2/3")):
+                    zone_x = start_x + span * fraction
+                    study_fig.add_vline(
+                        x=zone_x, line_color=color, line_dash="dot", line_width=1.0,
+                        opacity=0.65
+                    )
+                    study_fig.add_annotation(
+                        x=zone_x, y=0.02, yref="paper", yshift=-2,
+                        text=f"{body} {label}", showarrow=False, textangle=-90,
+                        font=dict(size=8, color="#ffffff"),
+                        bgcolor="rgba(13,18,25,0.55)", borderpad=2
+                    )
+
     # Historical eclipse verticals. Solar/Lunar toggles control these independently.
     for event in event_points:
         if event["body"] == "Solar" and not show_solar:
@@ -318,7 +370,7 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
         study_fig.add_annotation(
             x=event["calendar_date"], y=1.0, yref="paper", yshift=8,
             text=event["body"], showarrow=False, textangle=-90,
-            font=dict(size=9, color=color)
+            font=dict(size=9, color="#ffffff")
         )
 
     # Horizontal price levels use the OPEN of the most recent visible eclipses,
@@ -348,6 +400,50 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
     future_calendar = get_eclipse_calendar_data()
     future_calendar = future_calendar[future_calendar["date"] > end_ts].sort_values("date")
     future_calendar = future_calendar.head(int(future_eclipse_count))
+    # Future 1/3 and 2/3 signals: extend the same-body cycle from the last
+    # available eclipse into the selected future eclipse calendar. These are
+    # projections only; they do not use or imply future market prices.
+    future_fib_points = []
+    if show_future_fib_signals:
+        combined_calendar = pd.concat([
+            all_study_eclipses[["date", "kind", "type", "saros"]].copy(),
+            future_calendar[["date", "kind", "type", "saros"]].copy()
+        ], ignore_index=True).drop_duplicates(subset=["date", "kind"]).sort_values("date")
+
+        for body in ("Solar", "Lunar"):
+            if body == "Solar" and not show_solar:
+                continue
+            if body == "Lunar" and not show_lunar:
+                continue
+            body_events = combined_calendar[combined_calendar["kind"] == body].sort_values("date")
+            for start_event, end_event in zip(body_events.iloc[:-1].itertuples(index=False), body_events.iloc[1:].itertuples(index=False)):
+                start_x = pd.Timestamp(start_event.date).normalize()
+                end_x = pd.Timestamp(end_event.date).normalize()
+                if end_x <= end_ts or end_x <= start_x:
+                    continue
+                span = end_x - start_x
+                for fraction, label in ((1/3, "1/3"), (2/3, "2/3")):
+                    signal_x = start_x + span * fraction
+                    if signal_x > end_ts:
+                        future_fib_points.append({
+                            "body": body, "label": label, "date": signal_x,
+                            "start": start_x, "end": end_x
+                        })
+
+        for signal in future_fib_points:
+            color = colors[signal["body"]]
+            study_fig.add_vline(
+                x=signal["date"], line_color=color, line_dash="dashdot",
+                line_width=1.2, opacity=0.9
+            )
+            study_fig.add_annotation(
+                x=signal["date"], y=0.02, yref="paper", yshift=-2,
+                text=f'{signal["body"]} {signal["label"]} (FUTURE)',
+                showarrow=False, textangle=-90,
+                font=dict(size=8, color="#ffffff"),
+                bgcolor="rgba(13,18,25,0.72)", borderpad=2
+            )
+
     for _, event in future_calendar.iterrows():
         if event["kind"] == "Solar" and not show_solar:
             continue
@@ -358,7 +454,7 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
         study_fig.add_annotation(
             x=event["date"], y=1.0, yref="paper", yshift=8,
             text=f"{event['kind']} (FUTURE)", showarrow=False, textangle=-90,
-            font=dict(size=9, color=color)
+            font=dict(size=9, color="#ffffff")
         )
 
     # Leave the x-axis wide enough to display future verticals without requesting
@@ -374,6 +470,106 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
         rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False
     )
     st.plotly_chart(study_fig, use_container_width=True)
+
+    if show_third_behavior and not study_df.empty and not price_df.empty:
+        # Measure actual market behavior inside each completed same-body cycle.
+        # The cycle is split by calendar-time boundaries at 1/3 and 2/3, while
+        # performance is measured only from available trading sessions.
+        third_rows = []
+        for _, cycle in study_df.dropna(subset=["Next Same-Class", "Next Trading Date"]).iterrows():
+            cycle_start = pd.Timestamp(cycle["Eclipse Date"]).normalize()
+            cycle_end = pd.Timestamp(cycle["Next Same-Class"]).normalize()
+            span = cycle_end - cycle_start
+            if span <= pd.Timedelta(0):
+                continue
+            boundaries = [cycle_start, cycle_start + span / 3, cycle_start + span * 2 / 3, cycle_end]
+            body = cycle["Body"]
+
+            for third_num in range(3):
+                seg_start = boundaries[third_num]
+                seg_end = boundaries[third_num + 1]
+                # Use half-open intervals for thirds 1/2 so a boundary session
+                # cannot be counted twice; include the final eclipse in third 3.
+                if third_num < 2:
+                    segment = price_df[(price_df["Date"] >= seg_start) & (price_df["Date"] < seg_end)].copy()
+                else:
+                    segment = price_df[(price_df["Date"] >= seg_start) & (price_df["Date"] <= seg_end)].copy()
+                if segment.empty:
+                    continue
+
+                entry = float(segment.iloc[0]["Open"])
+                exit_close = float(segment.iloc[-1]["Close"])
+                delta = exit_close - entry
+                pct = (delta / entry) * 100.0 if entry else 0.0
+                max_profit = float(segment["High"].max() - entry)
+                max_drawdown = float(entry - segment["Low"].min())
+
+                third_rows.append({
+                    "Cycle Start": cycle_start,
+                    "Cycle End": cycle_end,
+                    "Body": body,
+                    "Third": f"Third {third_num + 1}",
+                    "Start Boundary": seg_start,
+                    "End Boundary": seg_end,
+                    "Trading Days": int(len(segment)),
+                    "Entry Open": entry,
+                    "Exit Close": exit_close,
+                    "Delta ($)": delta,
+                    "Return (%)": pct,
+                    "Max Profit": max_profit,
+                    "Max Drawdown": max_drawdown,
+                    "Result": "Win" if delta > 0 else "Loss"
+                })
+
+        third_df = pd.DataFrame(third_rows)
+        if not third_df.empty:
+            st.markdown("### 1/3 Cycle Price Behavior")
+            st.caption("Each completed Solar-to-Solar and Lunar-to-Lunar cycle is divided into three equal calendar-time sections. Returns use the first available trading-day OPEN and the last available trading-day CLOSE inside each third; highs/lows show the excursion within that third.")
+
+            behavior_col1, behavior_col2 = st.columns(2)
+            with behavior_col1:
+                behavior_body = st.multiselect(
+                    "Behavior Body", ["Solar", "Lunar"], default=["Solar", "Lunar"],
+                    key="eclipse_behavior_body"
+                )
+            with behavior_col2:
+                behavior_third = st.multiselect(
+                    "Cycle Third", ["Third 1", "Third 2", "Third 3"],
+                    default=["Third 1", "Third 2", "Third 3"], key="eclipse_behavior_third"
+                )
+
+            behavior_display = third_df[
+                third_df["Body"].isin(behavior_body) & third_df["Third"].isin(behavior_third)
+            ].copy()
+            behavior_display = behavior_display.sort_values(["Cycle Start", "Body", "Third"]).reset_index(drop=True)
+
+            formatted_behavior = behavior_display.copy()
+            for col in ["Cycle Start", "Cycle End", "Start Boundary", "End Boundary"]:
+                formatted_behavior[col] = pd.to_datetime(formatted_behavior[col]).dt.strftime("%Y-%m-%d")
+            for col in ["Entry Open", "Exit Close", "Delta ($)", "Max Profit", "Max Drawdown"]:
+                formatted_behavior[col] = formatted_behavior[col].map(lambda x: f"${x:,.2f}")
+            formatted_behavior["Return (%)"] = formatted_behavior["Return (%)"].map(lambda x: f"{x:+.2f}%")
+
+            st.dataframe(formatted_behavior, use_container_width=True, hide_index=True)
+
+            summary = third_df[third_df["Body"].isin(behavior_body) & third_df["Third"].isin(behavior_third)].copy()
+            if not summary.empty:
+                summary_stats = summary.groupby(["Body", "Third"], as_index=False).agg(
+                    Samples=("Return (%)", "count"),
+                    Avg_Return=("Return (%)", "mean"),
+                    Median_Return=("Return (%)", "median"),
+                    Win_Rate=("Result", lambda x: (x == "Win").mean() * 100.0),
+                    Avg_Max_Profit=("Max Profit", "mean"),
+                    Avg_Max_Drawdown=("Max Drawdown", "mean")
+                )
+                st.markdown("#### Third-by-Third Summary")
+                summary_display = summary_stats.copy()
+                summary_display.columns = ["Body", "Third", "Samples", "Avg Return %", "Median Return %", "Win Rate %", "Avg Max Profit $", "Avg Max Drawdown $"]
+                for col in ["Avg Return %", "Median Return %", "Win Rate %"]:
+                    summary_display[col] = summary_display[col].map(lambda x: f"{x:+.2f}%")
+                for col in ["Avg Max Profit $", "Avg Max Drawdown $"]:
+                    summary_display[col] = summary_display[col].map(lambda x: f"${x:,.2f}")
+                st.dataframe(summary_display, use_container_width=True, hide_index=True)
 
     if study_df.empty:
         st.info("No eclipse events overlap the selected price history.")
@@ -529,7 +725,7 @@ def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func,
         option_fig.add_annotation(
             x=event_date, y=1.0, yref="paper", yshift=8,
             text=f"{event['kind']} {event['type']}", showarrow=False,
-            textangle=-90, font=dict(size=9)
+            textangle=-90, font=dict(size=9, color="#ffffff")
         )
 
         future = option_indexed[option_indexed.index >= event_date]
@@ -541,6 +737,19 @@ def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func,
         if len(entry_pos) == 0:
             continue
         pos = int(entry_pos[0])
+
+        # Add a horizontal price level at the contract price on the eclipse event.
+        # This mirrors the price-level behavior used on the lunar/stock chart.
+        event_color = "#f59e0b" if event["kind"] == "Solar" else "#8b5cf6"
+        option_fig.add_hline(
+            y=entry_close,
+            line_dash="dash",
+            line_color=event_color,
+            line_width=1.5,
+            annotation_text=f'{event["kind"]}: ${entry_close:.2f}',
+            annotation_position="bottom right",
+            annotation_font=dict(color=event_color, size=11)
+        )
 
         row = {
             "Eclipse Date": event["date"],
