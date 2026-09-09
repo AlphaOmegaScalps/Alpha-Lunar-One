@@ -10,11 +10,12 @@ import google.generativeai as genai
 import io
 from PIL import Image
 import base64
+import json
+import re
 import streamlit.components.v1 as components
 
 # --- Page Configuration (MUST be the first Streamlit command) ---
 st.set_page_config(page_title="The Alpha - Simplifying Your Trading", layout="wide", page_icon="📈")
-
 
 # --- USER AUTHENTICATION (NEW CODE) ---
 def check_login():
@@ -46,7 +47,522 @@ def show_login_form():
             else:
                 st.error("Invalid username or password")
 
+
 # --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
+
+def get_eclipse_calendar_data():
+    """NASA eclipse calendar data for the Eclipses page and future market studies."""
+    eclipses = [
+        {"date":"2026-08-28","kind":"Lunar","type":"Partial","saros":138,"visibility":"Eastern Pacific, Americas, Europe, Africa","solar_path":False},
+        {"date":"2027-02-06","kind":"Solar","type":"Annular","saros":131,"visibility":"South America, Antarctica, western & southern Africa","solar_path":True},
+        {"date":"2027-02-20","kind":"Lunar","type":"Penumbral","saros":143,"visibility":"Americas, Europe, Africa, Asia","solar_path":False},
+        {"date":"2027-07-18","kind":"Lunar","type":"Penumbral","saros":110,"visibility":"Eastern Africa, Asia, Australia, Pacific","solar_path":False},
+        {"date":"2027-08-02","kind":"Solar","type":"Total","saros":136,"visibility":"Africa, Europe, Middle East, western & southern Asia","solar_path":True},
+        {"date":"2027-08-17","kind":"Lunar","type":"Penumbral","saros":148,"visibility":"Pacific, Americas","solar_path":False},
+        {"date":"2028-01-12","kind":"Lunar","type":"Partial","saros":115,"visibility":"Americas, Europe, Africa","solar_path":False},
+        {"date":"2028-01-26","kind":"Solar","type":"Annular","saros":141,"visibility":"Eastern North America, Central & South America, western Europe, northwest Africa","solar_path":True},
+        {"date":"2028-07-06","kind":"Lunar","type":"Partial","saros":120,"visibility":"Europe, Africa, Asia, Australia","solar_path":False},
+        {"date":"2028-07-22","kind":"Solar","type":"Total","saros":146,"visibility":"Southeast Asia, East Indies, Australia, New Zealand","solar_path":True},
+        {"date":"2028-12-31","kind":"Lunar","type":"Total","saros":125,"visibility":"Europe, Africa, Asia, Australia, Pacific","solar_path":False},
+        {"date":"2029-01-14","kind":"Solar","type":"Partial","saros":151,"visibility":"North America, Central America","solar_path":False},
+        {"date":"2029-06-12","kind":"Solar","type":"Partial","saros":118,"visibility":"Arctic, Scandinavia, Alaska, northern Asia, northern Canada","solar_path":False},
+        {"date":"2029-06-26","kind":"Lunar","type":"Total","saros":130,"visibility":"Americas, Europe, Africa, Middle East","solar_path":False},
+        {"date":"2029-07-11","kind":"Solar","type":"Partial","saros":156,"visibility":"Southern Chile, southern Argentina","solar_path":False},
+        {"date":"2029-12-05","kind":"Solar","type":"Partial","saros":123,"visibility":"Southern Argentina, southern Chile, Antarctica","solar_path":False},
+        {"date":"2029-12-20","kind":"Lunar","type":"Total","saros":135,"visibility":"Americas, Europe, Africa, Asia","solar_path":False},
+        {"date":"2030-06-01","kind":"Solar","type":"Annular","saros":128,"visibility":"Europe, northern Africa, Middle East, Asia, Arctic, Alaska","solar_path":True},
+        {"date":"2030-06-15","kind":"Lunar","type":"Partial","saros":140,"visibility":"Europe, Africa, Asia, Australia","solar_path":False},
+        {"date":"2030-11-25","kind":"Solar","type":"Total","saros":133,"visibility":"Southern Africa, southern Indian Ocean, East Indies, Australia, Antarctica","solar_path":True},
+    ]
+    df = pd.DataFrame(eclipses)
+    df["date"] = pd.to_datetime(df["date"])
+    df["label"] = df["date"].dt.strftime("%b %d, %Y") + " · " + df["type"] + " " + df["kind"]
+    df["days_away"] = (df["date"] - pd.Timestamp(dt.datetime.utcnow().date())).dt.days
+    return df.sort_values("date").reset_index(drop=True)
+
+
+def get_historical_eclipse_study_data(start_date, end_date):
+    """NASA-sourced eclipse dates for historical price-event studies."""
+    eclipses = [
+        # Solar eclipses, 2016-2026
+        ("2016-09-01", "Solar", "Annular", 135),
+        ("2017-02-26", "Solar", "Annular", 140),
+        ("2017-08-21", "Solar", "Total", 145),
+        ("2018-02-15", "Solar", "Partial", 150),
+        ("2018-07-13", "Solar", "Partial", 117),
+        ("2018-08-11", "Solar", "Partial", 155),
+        ("2019-01-06", "Solar", "Partial", 122),
+        ("2019-07-02", "Solar", "Total", 127),
+        ("2019-12-26", "Solar", "Annular", 132),
+        ("2020-06-21", "Solar", "Annular", 137),
+        ("2020-12-14", "Solar", "Total", 142),
+        ("2021-06-10", "Solar", "Annular", 147),
+        ("2021-12-04", "Solar", "Total", 152),
+        ("2022-04-30", "Solar", "Partial", 119),
+        ("2022-10-25", "Solar", "Partial", 124),
+        ("2023-04-20", "Solar", "Hybrid", 129),
+        ("2023-10-14", "Solar", "Annular", 134),
+        ("2024-04-08", "Solar", "Total", 139),
+        ("2024-10-02", "Solar", "Annular", 144),
+        ("2025-03-29", "Solar", "Partial", 149),
+        ("2025-09-21", "Solar", "Partial", 154),
+        ("2026-02-17", "Solar", "Annular", 121),
+        ("2026-08-12", "Solar", "Total", 126),
+        # Lunar eclipses, 2016-2026
+        ("2016-09-16", "Lunar", "Penumbral", 147),
+        ("2017-02-11", "Lunar", "Penumbral", 114),
+        ("2017-08-07", "Lunar", "Partial", 119),
+        ("2018-01-31", "Lunar", "Total", 124),
+        ("2018-07-27", "Lunar", "Total", 129),
+        ("2019-01-21", "Lunar", "Total", 134),
+        ("2019-07-16", "Lunar", "Partial", 139),
+        ("2020-01-10", "Lunar", "Penumbral", 144),
+        ("2020-06-05", "Lunar", "Penumbral", 111),
+        ("2020-07-05", "Lunar", "Penumbral", 149),
+        ("2020-11-30", "Lunar", "Penumbral", 116),
+        ("2021-05-26", "Lunar", "Total", 121),
+        ("2021-11-19", "Lunar", "Partial", 126),
+        ("2022-05-16", "Lunar", "Total", 131),
+        ("2022-11-08", "Lunar", "Total", 136),
+        ("2023-05-05", "Lunar", "Penumbral", 141),
+        ("2023-10-28", "Lunar", "Partial", 146),
+        ("2024-03-25", "Lunar", "Penumbral", 113),
+        ("2024-09-18", "Lunar", "Partial", 118),
+        ("2025-03-14", "Lunar", "Total", 123),
+        ("2025-09-07", "Lunar", "Total", 128),
+        ("2026-03-03", "Lunar", "Total", 133),
+        ("2026-08-28", "Lunar", "Partial", 138),
+    ]
+    df = pd.DataFrame(eclipses, columns=["date", "kind", "type", "saros"])
+    df["date"] = pd.to_datetime(df["date"])
+    start_ts = pd.Timestamp(start_date)
+    end_ts = pd.Timestamp(end_date)
+    return df[(df["date"] >= start_ts) & (df["date"] <= end_ts)].sort_values("date").reset_index(drop=True)
+
+
+def display_eclipse_price_study(get_price_data_func, ticker, end_date):
+    """Price history with historical eclipse markers and post-eclipse performance study."""
+    st.markdown("### Historical Eclipse Price Study")
+    st.caption("Use custom start/end dates, toggle Solar/Lunar event verticals, and filter/sort the event database below.")
+
+    end_default = pd.Timestamp(end_date).date()
+    start_default = (pd.Timestamp(end_date) - pd.DateOffset(years=10)).date()
+
+    date_col1, date_col2 = st.columns(2)
+    with date_col1:
+        study_start_date = st.date_input(
+            "Study Start Date", value=start_default,
+            max_value=end_default, key="eclipse_study_start"
+        )
+    with date_col2:
+        study_end_date = st.date_input(
+            "Study End Date", value=end_default,
+            max_value=dt.date.today(), key="eclipse_study_end"
+        )
+
+    if study_start_date > study_end_date:
+        st.error("Study Start Date must be on or before Study End Date.")
+        return None, None
+
+    start_ts = pd.Timestamp(study_start_date)
+    end_ts = pd.Timestamp(study_end_date)
+    eclipse_df = get_historical_eclipse_study_data(start_ts, end_ts)
+
+    filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
+    with filter_col1:
+        eclipse_body = st.selectbox("Eclipse Body", ["All", "Solar", "Lunar"], key="eclipse_price_body")
+    with filter_col2:
+        eclipse_types_available = sorted(eclipse_df["type"].unique().tolist()) if not eclipse_df.empty else []
+        eclipse_type = st.selectbox("Eclipse Type", ["All"] + eclipse_types_available, key="eclipse_price_type")
+    with filter_col3:
+        show_solar = st.checkbox("Show Solar Verticals", value=True, key="eclipse_show_solar")
+    with filter_col4:
+        show_lunar = st.checkbox("Show Lunar Verticals", value=True, key="eclipse_show_lunar")
+
+    if eclipse_body != "All":
+        eclipse_df = eclipse_df[eclipse_df["kind"] == eclipse_body].copy()
+    if eclipse_type != "All":
+        eclipse_df = eclipse_df[eclipse_df["type"] == eclipse_type].copy()
+
+    # The database filters above determine which events are shown on the chart/table.
+    # Vertical toggles independently control whether Solar/Lunar markers are drawn.
+    price_start = (start_ts - pd.Timedelta(days=7)).date()
+    price_end = end_ts.date()
+    with st.spinner(f"Loading {ticker} price history for the eclipse study..."):
+        price_df = get_price_data_func(ticker, price_start, price_end)
+
+    if price_df.empty:
+        st.warning(f"No price history was returned for {ticker}.")
+        return study_start_date, study_end_date
+
+    price_df = price_df.copy()
+    price_df["Date"] = pd.to_datetime(price_df["Date"]).dt.normalize()
+    price_df = price_df.sort_values("Date").reset_index(drop=True)
+
+    study_fig = go.Figure(data=[go.Candlestick(
+        x=price_df["Date"].tolist(),
+        open=price_df["Open"].astype(float).tolist(),
+        high=price_df["High"].astype(float).tolist(),
+        low=price_df["Low"].astype(float).tolist(),
+        close=price_df["Close"].astype(float).tolist(),
+        name=ticker
+    )])
+
+    colors = {"Solar": "#f59e0b", "Lunar": "#8b5cf6"}
+    dash_styles = {"Total": "solid", "Annular": "dash", "Hybrid": "dashdot", "Partial": "dot", "Penumbral": "dot"}
+    for _, event in eclipse_df.iterrows():
+        event_date = event["date"]
+        if event_date < price_df["Date"].min() or event_date > price_df["Date"].max():
+            continue
+        if event["kind"] == "Solar" and not show_solar:
+            continue
+        if event["kind"] == "Lunar" and not show_lunar:
+            continue
+        color = colors.get(event["kind"], "#ffffff")
+        dash = dash_styles.get(event["type"], "dot")
+        study_fig.add_vline(x=event_date, line_color=color, line_dash=dash, line_width=1.5)
+        study_fig.add_annotation(
+            x=event_date, y=1.0, yref="paper", yshift=8,
+            text=f"{event['kind']} {event['type']}", showarrow=False,
+            textangle=-90, font=dict(size=9, color=color)
+        )
+
+    study_fig.update_layout(
+        title=f"{ticker} — Eclipse Price History ({study_start_date} → {study_end_date})",
+        xaxis_title="Date", yaxis_title="Price (USD)",
+        xaxis_rangeslider_visible=False, height=700
+    )
+    study_fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
+    st.plotly_chart(study_fig, use_container_width=True)
+
+    # Event-study statistics use the first trading session on/after the eclipse date.
+    price_indexed = price_df.set_index("Date").sort_index()
+    rows = []
+    for _, event in eclipse_df.iterrows():
+        event_date = pd.Timestamp(event["date"]).normalize()
+        future = price_indexed[price_indexed.index >= event_date]
+        if future.empty:
+            continue
+        event_row = future.iloc[0]
+        event_trade_date = future.index[0]
+        event_close = float(event_row["Close"])
+        event_pos = price_df.index[price_df["Date"] == event_trade_date]
+        if len(event_pos) == 0:
+            continue
+        pos = int(event_pos[0])
+        result = {
+            "Date": event["date"], "Body": event["kind"], "Type": event["type"], "Saros": int(event["saros"]),
+            "Trading Date": event_trade_date, "Eclipse Close": event_close
+        }
+        for days in (5, 10, 20):
+            target_pos = pos + days
+            if target_pos < len(price_df):
+                future_close = float(price_df.iloc[target_pos]["Close"])
+                result[f"{days}D Return"] = (future_close / event_close - 1.0) * 100.0
+            else:
+                result[f"{days}D Return"] = None
+        rows.append(result)
+
+    study_df = pd.DataFrame(rows)
+    if study_df.empty:
+        st.info("No completed eclipse events are available in the selected date range.")
+        return study_start_date, study_end_date
+
+    # Compare each event to the immediately previous event of the same body.
+    study_df = study_df.sort_values("Date").reset_index(drop=True)
+    study_df["Latest Same-Class"] = pd.NaT
+    study_df["Previous 20D Return"] = None
+    study_df["Result"] = "N/A"
+    for body in ["Solar", "Lunar"]:
+        idxs = study_df.index[study_df["Body"] == body].tolist()
+        for i in range(1, len(idxs)):
+            idx, prev = idxs[i], idxs[i-1]
+            study_df.at[idx, "Latest Same-Class"] = study_df.at[prev, "Date"]
+            pr, cr = study_df.at[prev, "20D Return"], study_df.at[idx, "20D Return"]
+            study_df.at[idx, "Previous 20D Return"] = pr
+            if pd.notna(pr) and pd.notna(cr):
+                study_df.at[idx, "Result"] = "WIN" if (cr > 0) == (pr > 0) else "LOSS"
+
+    st.markdown("### Eclipse Event Database")
+    st.caption("Filter and sort the database independently from the chart. WIN/LOSS compares 20-trading-day direction with the immediately previous eclipse of the same body: Lunar → Lunar, Solar → Solar.")
+
+    db1, db2, db3 = st.columns(3)
+    with db1:
+        db_body = st.multiselect("Filter Body", ["Solar", "Lunar"], default=["Solar", "Lunar"], key="eclipse_db_body")
+    with db2:
+        db_types = sorted(study_df["Type"].unique().tolist())
+        db_type = st.multiselect("Filter Eclipse Type", db_types, default=db_types, key="eclipse_db_type")
+    with db3:
+        db_results = st.multiselect("Filter Result", ["WIN", "LOSS", "N/A"], default=["WIN", "LOSS", "N/A"], key="eclipse_db_result")
+
+    sort_col1, sort_col2 = st.columns(2)
+    with sort_col1:
+        sort_options = ["Date", "Body", "Type", "Saros", "Trading Date", "Eclipse Close", "5D Return", "10D Return", "20D Return", "Latest Same-Class", "Previous 20D Return", "Result"]
+        sort_by = st.selectbox("Sort Database By", sort_options, index=0, key="eclipse_db_sort")
+    with sort_col2:
+        sort_direction = st.radio("Sort Direction", ["Newest / Highest", "Oldest / Lowest"], horizontal=True, key="eclipse_db_direction")
+
+    filtered_df = study_df.copy()
+    if db_body:
+        filtered_df = filtered_df[filtered_df["Body"].isin(db_body)]
+    else:
+        filtered_df = filtered_df.iloc[0:0]
+    if db_type:
+        filtered_df = filtered_df[filtered_df["Type"].isin(db_type)]
+    else:
+        filtered_df = filtered_df.iloc[0:0]
+    if db_results:
+        filtered_df = filtered_df[filtered_df["Result"].isin(db_results)]
+    else:
+        filtered_df = filtered_df.iloc[0:0]
+
+    ascending = sort_direction == "Oldest / Lowest"
+    filtered_df = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
+
+    display_df = filtered_df.copy()
+    display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
+    display_df["Trading Date"] = display_df["Trading Date"].dt.strftime("%Y-%m-%d")
+    display_df["Latest Same-Class"] = display_df["Latest Same-Class"].apply(lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "—")
+    for col in ["Eclipse Close", "5D Return", "10D Return", "20D Return", "Previous 20D Return"]:
+        if "Return" in col:
+            display_df[col] = display_df[col].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
+        else:
+            display_df[col] = display_df[col].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+
+    def color_eclipse_row(row):
+        r = row.get("Result", "N/A")
+        bg = {"WIN": "rgba(34,197,94,.16)", "LOSS": "rgba(239,68,68,.16)"}.get(r, "")
+        return [f"background-color: {bg}" if bg else ""] * len(row)
+
+    st.dataframe(display_df.style.apply(color_eclipse_row, axis=1), use_container_width=True, hide_index=True)
+
+    completed = study_df.dropna(subset=["20D Return"]).copy()
+    if not completed.empty:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Eclipses Tracked", len(study_df))
+        c2.metric("Avg 5D Return", f"{study_df['5D Return'].dropna().mean():+.2f}%")
+        c3.metric("Avg 10D Return", f"{study_df['10D Return'].dropna().mean():+.2f}%")
+        c4.metric("Avg 20D Return", f"{completed['20D Return'].mean():+.2f}%")
+
+
+def display_eclipse_option_study(ticker, eclipse_df):
+    """Use the exact same option lookup/history workflow as Charts & Options, then overlay eclipse events."""
+    st.markdown("### Eclipse Options Comparison")
+    st.caption("This uses the same Polygon contract lookup and historical-data logic as the main Charts & Options section. Select the exact expiration, strike, and call/put, then compare that contract's actual gains around the eclipse dates.")
+
+    if not ticker:
+        st.info("Select a stock ticker first.")
+        return
+
+    # EXACT SAME CONTRACT DISCOVERY LOGIC AS THE MAIN OPTIONS SECTION.
+    sorted_expirations, contract_data = get_all_contract_info_free(ticker)
+    if not sorted_expirations:
+        st.warning(f"Could not find any option expiration dates for {ticker}.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        exp_date_str = st.selectbox("Select Expiration Date", options=sorted_expirations, key="eclipse_option_exp")
+    strikes = contract_data.get(exp_date_str, [])
+    if not strikes:
+        st.warning("No strikes found for this expiration.")
+        return
+    with col2:
+        strike_price = st.selectbox("Select Strike Price", options=strikes, key="eclipse_option_strike")
+    with col3:
+        option_type = st.radio("Select Option Type", ["call", "put"], horizontal=True, key="eclipse_option_type")
+
+    if not st.button("Fetch Contract Details", key="eclipse_option_fetch"):
+        st.info("Choose an expiration, strike, and call/put, then click Fetch Contract Details.")
+        return
+
+    # EXACT SAME HISTORY FETCH AS THE MAIN OPTIONS SECTION.
+    with st.spinner(f"Fetching {option_type.upper()} @ ${strike_price} expiring {exp_date_str}..."):
+        details, history_df = get_single_contract_details_free(
+            ticker, exp_date_str, strike_price, option_type
+        )
+
+    if details:
+        st.subheader(f"Details for {details['symbol']} (as of yesterday's close)")
+        c1, c2, c3, c4, c5 = st.columns(5)
+        c1.metric("Close", f"${details['close']:.2f}" if isinstance(details['close'], (int, float)) else "N/A")
+        c2.metric("Open", f"${details['open']:.2f}" if isinstance(details['open'], (int, float)) else "N/A")
+        c3.metric("High", f"${details['high']:.2f}" if isinstance(details['high'], (int, float)) else "N/A")
+        c4.metric("Low", f"${details['low']:.2f}" if isinstance(details['low'], (int, float)) else "N/A")
+        c5.metric("Volume", f"{details['volume']:,}" if isinstance(details['volume'], (int, float)) else "N/A")
+
+    if history_df is None or history_df.empty:
+        st.info("No price history found for this contract.")
+        return
+
+    history_df = history_df.copy().sort_values("Date").reset_index(drop=True)
+    history_df["Date"] = pd.to_datetime(history_df["Date"]).dt.normalize()
+
+    st.subheader("Contract Price History")
+    y_min_hist, y_max_hist = history_df["Low"].min(), history_df["High"].max()
+
+    # Same chart construction as Charts & Options.
+    if chart_type == "Line":
+        option_fig = go.Figure(data=[go.Scatter(
+            x=history_df["Date"].tolist(),
+            y=history_df["Close"].astype(float).tolist(),
+            mode="lines",
+            name="Close"
+        )])
+        option_fig.update_layout(title_text=f"Price History for {details['symbol']}")
+    else:
+        option_fig = go.Figure(data=[go.Candlestick(
+            x=history_df["Date"].tolist(),
+            open=history_df["Open"].astype(float).tolist(),
+            high=history_df["High"].astype(float).tolist(),
+            low=history_df["Low"].astype(float).tolist(),
+            close=history_df["Close"].astype(float).tolist()
+        )])
+        option_fig.update_layout(title_text=f"Price History for {details['symbol']}", xaxis_rangeslider_visible=False)
+        option_fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
+
+    # Only draw eclipse markers that actually fall inside this contract's available history.
+    option_indexed = history_df.set_index("Date").sort_index()
+    option_rows = []
+    for _, event in eclipse_df.iterrows():
+        event_date = pd.Timestamp(event["date"]).normalize()
+        if event_date < history_df["Date"].min() or event_date > history_df["Date"].max():
+            continue
+
+        option_fig.add_vline(
+            x=event_date,
+            line_color="#f59e0b" if event["kind"] == "Solar" else "#8b5cf6",
+            line_dash="dash",
+            line_width=1.2
+        )
+        option_fig.add_annotation(
+            x=event_date, y=1.0, yref="paper", yshift=8,
+            text=f"{event['kind']} {event['type']}", showarrow=False,
+            textangle=-90, font=dict(size=9)
+        )
+
+        future = option_indexed[option_indexed.index >= event_date]
+        if future.empty:
+            continue
+        entry_date = future.index[0]
+        entry_close = float(future.iloc[0]["Close"])
+        entry_pos = history_df.index[history_df["Date"] == entry_date]
+        if len(entry_pos) == 0:
+            continue
+        pos = int(entry_pos[0])
+
+        row = {
+            "Eclipse Date": event["date"],
+            "Body": event["kind"],
+            "Type": event["type"],
+            "Option Entry Date": entry_date,
+            "Option Entry": entry_close,
+        }
+        for days in (5, 10, 20):
+            target = pos + days
+            if target < len(history_df):
+                exit_close = float(history_df.iloc[target]["Close"])
+                row[f"{days}D Gain"] = (exit_close / entry_close - 1.0) * 100.0
+            else:
+                row[f"{days}D Gain"] = None
+        option_rows.append(row)
+
+    option_fig.update_xaxes(range=[history_df["Date"].min(), history_df["Date"].max()])
+    option_fig.update_yaxes(range=[y_min_hist * 0.98, y_max_hist * 1.25] if y_min_hist >= 0 else None)
+    st.plotly_chart(option_fig, use_container_width=True)
+
+    option_study = pd.DataFrame(option_rows)
+    if option_study.empty:
+        st.info("No eclipse events overlap this contract's available historical price data. The contract itself was fetched using the same logic as Charts & Options.")
+        return
+
+    st.markdown("### Option Gains by Eclipse")
+    option_display = option_study.copy()
+    option_display["Eclipse Date"] = option_display["Eclipse Date"].dt.strftime("%Y-%m-%d")
+    option_display["Option Entry Date"] = option_display["Option Entry Date"].dt.strftime("%Y-%m-%d")
+    for col in ["Option Entry", "5D Gain", "10D Gain", "20D Gain"]:
+        if "Gain" in col:
+            option_display[col] = option_display[col].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
+        else:
+            option_display[col] = option_display[col].map(lambda x: f"${x:.2f}" if pd.notna(x) else "N/A")
+
+    def color_option_row(row):
+        val = row.get("20D Gain", "N/A")
+        if isinstance(val, str) and val.startswith("+"):
+            return ["background-color: rgba(34,197,94,.16)"] * len(row)
+        if isinstance(val, str) and val.startswith("-"):
+            return ["background-color: rgba(239,68,68,.16)"] * len(row)
+        return [""] * len(row)
+
+    st.dataframe(option_display.style.apply(color_option_row, axis=1), use_container_width=True, hide_index=True)
+
+    valid20 = option_study["20D Gain"].dropna()
+    if not valid20.empty:
+        a, b, c = st.columns(3)
+        a.metric("Avg 5D Option Gain", f"{option_study['5D Gain'].dropna().mean():+.2f}%")
+        b.metric("Avg 10D Option Gain", f"{option_study['10D Gain'].dropna().mean():+.2f}%")
+        c.metric("Avg 20D Option Gain", f"{valid20.mean():+.2f}%")
+
+def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None):
+    """Eclipse calendar, countdown, visibility feed, and NASA path map."""
+    eclipse_df = get_eclipse_calendar_data()
+    future_df = eclipse_df[eclipse_df["days_away"] >= 0].copy()
+    st.markdown("<div class='panel-label'>Eclipse intelligence</div>", unsafe_allow_html=True)
+    st.caption("Solar and lunar eclipse calendar based on NASA eclipse predictions, with an interactive path-map view for central solar eclipses.")
+    if not future_df.empty:
+        nxt = future_df.iloc[0]
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric("Next eclipse", nxt["date"].strftime("%b %d, %Y"))
+        c2.metric("Type", f"{nxt['type']} {nxt['kind']}")
+        c3.metric("Days away", f"{int(nxt['days_away']):,}")
+        c4.metric("Saros", str(int(nxt["saros"])))
+    a,b,c = st.columns(3)
+    with a: view_mode = st.radio("Feed", ["Upcoming", "All 2026–2030"], horizontal=True)
+    with b: selected_year = st.selectbox("Year", ["All"] + sorted(eclipse_df["date"].dt.year.unique().tolist()))
+    with c: selected_kind = st.selectbox("Body", ["All", "Solar", "Lunar"])
+    display_df = future_df.copy() if view_mode == "Upcoming" else eclipse_df.copy()
+    if selected_year != "All": display_df = display_df[display_df["date"].dt.year == int(selected_year)]
+    if selected_kind != "All": display_df = display_df[display_df["kind"] == selected_kind]
+    table_df = display_df[["date","kind","type","saros","visibility"]].copy()
+    table_df["date"] = table_df["date"].dt.strftime("%Y-%m-%d")
+    table_df.columns = ["Date","Body","Eclipse","Saros","Primary visibility"]
+    st.dataframe(table_df, use_container_width=True, hide_index=True)
+    st.markdown("### Eclipse map")
+    map_candidates = display_df[display_df["solar_path"]].copy()
+    if map_candidates.empty: map_candidates = future_df[future_df["solar_path"]].copy()
+    if not map_candidates.empty:
+        selected_label = st.selectbox("Select a central solar eclipse", map_candidates["label"].tolist())
+        selected = map_candidates[map_candidates["label"] == selected_label].iloc[0]
+        eclipse_id = selected["date"].strftime("%Y%m%d")
+        nasa_map_url = f"https://eclipse.gsfc.nasa.gov/SEsearch/SEsearchmap.php?Ecl={eclipse_id}"
+        st.info(f"{selected['label']} · Visibility: {selected['visibility']}")
+        st.markdown(
+    f"""
+    <a href="{nasa_map_url}" target="_blank">
+        <button style="
+            padding: 0.6rem 1.2rem;
+            border-radius: 6px;
+            border: 1px solid #888;
+            cursor: pointer;
+        ">
+            🌎 Open NASA Interactive Eclipse Map
+        </button>
+    </a>
+    """,
+    unsafe_allow_html=True
+)
+        st.info("Lunar eclipses are shown by global visibility region; there is no surface travel path like a solar eclipse's shadow track.")
+    study_dates = (None, None)
+    if get_price_data_func is not None and ticker and end_date is not None:
+        study_dates = display_eclipse_price_study(get_price_data_func, ticker, end_date)
+
+    if study_dates and study_dates[0] is not None and study_dates[1] is not None:
+        option_eclipse_df = get_historical_eclipse_study_data(study_dates[0], study_dates[1])
+        display_eclipse_option_study(ticker, option_eclipse_df)
+
+    st.markdown("### Eclipse research")
+    st.caption("Historical eclipse price studies are exploratory and do not establish causation or a trading signal.")
+
 def main_app():
 
     # --- API Key Configuration ---
@@ -58,7 +574,8 @@ def main_app():
 
     # MODIFIED: Polygon key now loaded securely from secrets
     try:
-        POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
+        POLYGON_API_KEY = "EQYXN1ceqg4zbMsRpnIyb4AmkgtNwbW0"
+        #POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
     except (FileNotFoundError, KeyError):
         st.error("Polygon API Key not found in secrets. Please add it to your secrets.toml file.")
         st.stop()
@@ -150,18 +667,45 @@ def main_app():
                 """, unsafe_allow_html=True)
 
     def get_price_data(ticker, start_date, end_date):
-        """Fetches historical price data for a stock from Polygon.io."""
+        """Fetch one canonical OHLC DataFrame for both charting and lunar analysis."""
         try:
             client = RESTClient(POLYGON_API_KEY)
             aggs = client.get_aggs(
-                ticker=ticker, multiplier=1, timespan="day", from_=start_date, to=end_date,
-                adjusted=True, sort="asc", limit=50000,
+                ticker=str(ticker).upper().strip(),
+                multiplier=1,
+                timespan="day",
+                from_=start_date,
+                to=end_date,
+                adjusted=True,
+                sort="asc",
+                limit=50000,
             )
             df = pd.DataFrame(aggs)
-            if df.empty: return pd.DataFrame()
-            df['Date'] = pd.to_datetime(df['timestamp'], unit='ms').dt.date
-            df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Adj Close', 'volume': 'Volume'}, inplace=True)
-            df['Close'] = df['Adj Close']
+            if df.empty:
+                return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"])
+
+            df = df.rename(columns={
+                "open": "Open",
+                "high": "High",
+                "low": "Low",
+                "close": "Close",
+                "volume": "Volume",
+            })
+            df["Date"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True).dt.tz_convert(None).dt.normalize()
+            for col in ["Open", "High", "Low", "Close", "Volume"]:
+                if col in df.columns:
+                    df[col] = pd.to_numeric(df[col], errors="coerce")
+
+            df = (
+                df[["Date", "Open", "High", "Low", "Close", "Volume"]]
+                .dropna(subset=["Date", "Open", "High", "Low", "Close"])
+                .sort_values("Date")
+                .drop_duplicates(subset=["Date"], keep="last")
+                .reset_index(drop=True)
+            )
+            # Preserve the old app's expected column while making it impossible
+            # for Line and Candlestick to use different underlying prices.
+            df["Adj Close"] = df["Close"].astype(float)
             return df
         except Exception as e:
             st.error(f"Failed to retrieve price data for {ticker}: {e}")
@@ -189,7 +733,7 @@ def main_app():
             st.error(f"Could not fetch contract info: {e}")
             return [], {}
 
-    def get_single_contract_details_free(ticker, expiration, strike, type):
+    def get_single_contract_details_free(ticker, expiration, strike, type, history_start=None, history_end=None):
         try:
             client = RESTClient(POLYGON_API_KEY)
             contract_list = list(client.list_options_contracts(
@@ -203,14 +747,74 @@ def main_app():
             option_ticker = contract_list[0].ticker
             
             yesterday = dt.date.today() - dt.timedelta(days=1)
-            one_year_ago = yesterday - dt.timedelta(days=365)
-            
-            history_aggs = client.get_aggs(option_ticker, 1, "day", one_year_ago.strftime('%Y-%m-%d'), yesterday.strftime('%Y-%m-%d'), limit=5000)
-            
+            history_start = history_start or (yesterday - dt.timedelta(days=365))
+            history_end = history_end or yesterday
+            history_aggs = client.get_aggs(
+                option_ticker,
+                1,
+                "day",
+                pd.Timestamp(history_start).strftime('%Y-%m-%d'),
+                pd.Timestamp(history_end).strftime('%Y-%m-%d'),
+                limit=5000
+            )
+
+            # Normalize Polygon option aggregates into the same clean OHLC
+            # structure used by the main stock-price chart.
             df = pd.DataFrame(history_aggs)
+
             if not df.empty:
-                df['Date'] = pd.to_datetime(df['timestamp'], unit='ms').dt.date
-                df.rename(columns={'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'}, inplace=True)
+                df = df.rename(columns={
+                    'open': 'Open',
+                    'high': 'High',
+                    'low': 'Low',
+                    'close': 'Close',
+                    'volume': 'Volume'
+                })
+
+                df['Date'] = (
+                    pd.to_datetime(
+                        df['timestamp'],
+                        unit='ms',
+                        utc=True
+                    )
+                    .dt.tz_convert(None)
+                    .dt.normalize()
+                )
+
+                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                    if col in df.columns:
+                        df[col] = pd.to_numeric(
+                            df[col],
+                            errors='coerce'
+                        )
+
+                df = (
+                    df[
+                        [
+                            'Date',
+                            'Open',
+                            'High',
+                            'Low',
+                            'Close',
+                            'Volume'
+                        ]
+                    ]
+                    .dropna(
+                        subset=[
+                            'Date',
+                            'Open',
+                            'High',
+                            'Low',
+                            'Close'
+                        ]
+                    )
+                    .sort_values('Date')
+                    .drop_duplicates(
+                        subset=['Date'],
+                        keep='last'
+                    )
+                    .reset_index(drop=True)
+                )
 
             last_day_details = None
             try:
@@ -229,10 +833,15 @@ def main_app():
             st.error(f"Could not fetch contract details: {e}")
             return None, None
 
-    @st.cache_data(ttl=3600)
     def load_data(ticker, start_date, end_date):
         with st.spinner("Fetching stock data..."):
-            st.session_state.stock_data = get_price_data(ticker, start_date, end_date)
+            fresh_data = get_price_data(ticker, start_date, end_date)
+
+        # Always replace the chart dataset as one atomic update.
+        st.session_state.stock_data = fresh_data.copy()
+        st.session_state.loaded_ticker = str(ticker).upper().strip()
+        st.session_state.loaded_start_date = start_date
+        st.session_state.loaded_end_date = end_date
 
         if 'stock_data' in st.session_state and not st.session_state.stock_data.empty:
             start_date_obj = start_date if isinstance(start_date, dt.date) else start_date.date()
@@ -291,14 +900,20 @@ def main_app():
         if not all_moon_events or df.empty or open_col not in df.columns:
             return fig, analysis_results
 
-        df_indexed = df.set_index('Date')
+        # Normalize the index so moon-event dates and trading dates use
+        # the same pandas Timestamp type.
+        df_indexed = df.copy()
+        df_indexed['Date'] = pd.to_datetime(df_indexed['Date']).dt.normalize()
+        df_indexed = df_indexed.set_index('Date').sort_index()
 
         def find_next_trading_day(target_date, price_df):
-            current_date = pd.to_datetime(target_date).date()
-            while current_date <= price_df.index.max():
+            current_date = pd.Timestamp(target_date).normalize()
+            last_date = pd.Timestamp(price_df.index.max()).normalize()
+
+            while current_date <= last_date:
                 if current_date in price_df.index:
                     return price_df.loc[current_date]
-                current_date += dt.timedelta(days=1)
+                current_date += pd.Timedelta(days=1)
             return None
 
         cycle_points = []
@@ -518,34 +1133,458 @@ def main_app():
         st.dataframe(styled_df, use_container_width=True)
 
 
+    # --- TradingView Top Ticker Tape ---
+    def display_top_tradingview_ticker_tape():
+        """Render the TradingView web-component ticker tape at the top of the app."""
+        symbols = (
+            "FOREXCOM:SPXUSD,FOREXCOM:NSXUSD,FOREXCOM:DJI,FX:EURUSD,"
+            "BITSTAMP:BTCUSD,BITSTAMP:ETHUSD,CMCMARKETS:GOLD,"
+            "NASDAQ:AAPL,NASDAQ:NVDA,NASDAQ:TSLA,NASDAQ:MSFT,NASDAQ:AMZN,"
+            "NASDAQ:GOOGL,NASDAQ:META,NASDAQ:AVGO,NASDAQ:AMD,NASDAQ:NFLX,"
+            "NASDAQ:PLTR,NASDAQ:MU,NASDAQ:ARM,NASDAQ:QCOM,NASDAQ:INTC,"
+            "NASDAQ:ADBE,NASDAQ:AMAT,NASDAQ:CRWD,NASDAQ:CSCO,NASDAQ:SMCI,"
+            "NASDAQ:MSTR,NASDAQ:MRVL,NASDAQ:TXN,NASDAQ:PEP,NASDAQ:COST,"
+            "NYSE:JPM,NYSE:BAC,NYSE:GS,NYSE:V,NYSE:MA,NYSE:WMT,NYSE:COST,"
+            "NYSE:XOM,NYSE:CVX,NYSE:LLY,NYSE:UNH,NYSE:CAT,NYSE:GE,NYSE:HD,"
+            "NYSE:JNJ,NYSE:PG,NYSE:KO,NYSE:DIS,NYSE:CRM,NYSE:ORCL,NYSE:IBM,"
+            "NYSE:BA,NYSE:MMM,NYSE:UPS,NYSE:RTX,NYSE:SPOT,NYSE:UBER"
+        )
+        ticker_html = f"""
+        <!doctype html>
+        <html lang=\"en\">
+        <head>
+            <meta charset=\"UTF-8\">
+            <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+            <style>
+                html, body {{ margin: 0; padding: 0; background: transparent; overflow: hidden; }}
+                tv-ticker-tape {{ display: block; width: 100%; }}
+            </style>
+        </head>
+        <body>
+            <script type=\"module\" src=\"https://widgets.tradingview-widget.com/w/en/tv-ticker-tape.js\"></script>
+            <tv-ticker-tape
+                symbols=\"{symbols}\"
+                hide-chart
+                item-size=\"compact\"
+                show-hover
+                theme=\"light\"
+            ></tv-ticker-tape>
+        </body>
+        </html>
+        """
+        components.html(ticker_html, height=48, scrolling=False)
+
+    # --- TradingView Market Widgets ---
+    def display_tradingview_market_widgets(ticker, exchange):
+        """Render the TradingView market-data dashboard in ONE embedded frame.
+
+        Keeping all TradingView widgets inside a single components.html call avoids
+        creating a separate Streamlit iframe/window for every widget. The page can
+        scroll normally, but the widgets themselves are given enough height so the
+        user does not get a scrollbar for each individual Streamlit component.
+        """
+        ticker_clean = re.sub(r"[^A-Z0-9._-]", "", str(ticker).upper().strip())
+        exchange_clean = re.sub(r"[^A-Z]", "", str(exchange).upper().strip())
+        if not ticker_clean or not exchange_clean:
+            return
+
+        tv_symbol = f"{exchange_clean}:{ticker_clean}"
+
+        symbol_json = json.dumps(tv_symbol)
+
+        # One HTML document = one Streamlit component. The CSS grid below controls
+        # the layout of all TradingView widgets inside that single component.
+        market_dashboard_html = f"""
+        <!doctype html>
+        <html lang=\"en\">
+        <head>
+            <meta charset=\"UTF-8\">
+            <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+            <style>
+                * {{ box-sizing: border-box; }}
+                html, body {{
+                    margin: 0;
+                    padding: 0;
+                    background: transparent;
+                    color: #ffffff;
+                    font-family: Arial, sans-serif;
+                    overflow-x: hidden;
+                }}
+                .dashboard {{
+                    width: 100%;
+                    padding: 0;
+                }}
+                .section-title {{
+                    font-size: 16px;
+                    font-weight: 600;
+                    margin: 8px 0 8px 2px;
+                    color: #e6e6e6;
+                }}
+                .tape {{
+                    width: 100%;
+                    min-height: 64px;
+                    margin-bottom: 8px;
+                    overflow: hidden;
+                }}
+                .snapshot {{
+                    width: 100%;
+                    min-height: 125px;
+                    margin-bottom: 10px;
+                    overflow: hidden;
+                }}
+                .grid {{
+                    display: grid;
+                    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+                    gap: 12px;
+                    width: 100%;
+                    align-items: start;
+                }}
+                .card {{
+                    min-width: 0;
+                    width: 100%;
+                    overflow: hidden;
+                }}
+                .tech {{ height: 390px; }}
+                .profile {{ height: 390px; }}
+                .fundamentals {{ height: 510px; }}
+                .news {{ height: 510px; }}
+                .footer {{
+                    height: 22px;
+                }}
+                .tradingview-widget-container,
+                .tradingview-widget-container__widget {{
+                    width: 100% !important;
+                }}
+                @media (max-width: 850px) {{
+                    .grid {{ grid-template-columns: 1fr 1fr; gap: 8px; }}
+                    .tech, .profile {{ height: 420px; }}
+                    .fundamentals, .news {{ height: 540px; }}
+                }}
+            </style>
+        </head>
+        <body>
+        <div class=\"dashboard\">
+
+            <div class=\"section-title\">{ticker_clean} Market Snapshot</div>
+            <div class=\"snapshot\">
+                <div class=\"tradingview-widget-container\">
+                    <div class=\"tradingview-widget-container__widget\"></div>
+                    <script type=\"text/javascript\"
+                        src=\"https://s3.tradingview.com/external-embedding/embed-widget-symbol-info.js\"
+                        async>
+                        {{
+                            \"symbol\": {symbol_json},
+                            \"width\": \"100%\",
+                            \"locale\": \"en\",
+                            \"colorTheme\": \"dark\",
+                            \"isTransparent\": true
+                        }}
+                    </script>
+                </div>
+            </div>
+
+            <div class=\"grid\">
+                <div class=\"card tech\">
+                    <div class=\"tradingview-widget-container\" style=\"height:100%; width:100%\">
+                        <div class=\"tradingview-widget-container__widget\" style=\"height:100%; width:100%\"></div>
+                        <script type=\"text/javascript\"
+                            src=\"https://s3.tradingview.com/external-embedding/embed-widget-technical-analysis.js\"
+                            async>
+                            {{
+                                \"interval\": \"1D\",
+                                \"width\": \"100%\",
+                                \"height\": \"100%\",
+                                \"isTransparent\": true,
+                                \"symbol\": {symbol_json},
+                                \"showIntervalTabs\": true,
+                                \"displayMode\": \"single\",
+                                \"locale\": \"en\",
+                                \"colorTheme\": \"dark\"
+                            }}
+                        </script>
+                    </div>
+                </div>
+
+                <div class=\"card profile\">
+                    <div class=\"tradingview-widget-container\" style=\"height:100%; width:100%\">
+                        <div class=\"tradingview-widget-container__widget\" style=\"height:100%; width:100%\"></div>
+                        <script type=\"text/javascript\"
+                            src=\"https://s3.tradingview.com/external-embedding/embed-widget-company-profile.js\"
+                            async>
+                            {{
+                                \"width\": \"100%\",
+                                \"height\": \"100%\",
+                                \"colorTheme\": \"dark\",
+                                \"isTransparent\": true,
+                                \"symbol\": {symbol_json},
+                                \"locale\": \"en\"
+                            }}
+                        </script>
+                    </div>
+                </div>
+
+                <div class=\"card fundamentals\">
+                    <div class=\"tradingview-widget-container\" style=\"height:100%; width:100%\">
+                        <div class=\"tradingview-widget-container__widget\" style=\"height:100%; width:100%\"></div>
+                        <script type=\"text/javascript\"
+                            src=\"https://s3.tradingview.com/external-embedding/embed-widget-financials.js\"
+                            async>
+                            {{
+                                \"colorTheme\": \"dark\",
+                                \"isTransparent\": true,
+                                \"largeChartUrl\": \"\",
+                                \"displayMode\": \"adaptive\",
+                                \"width\": \"100%\",
+                                \"height\": \"100%\",
+                                \"symbol\": {symbol_json},
+                                \"locale\": \"en\"
+                            }}
+                        </script>
+                    </div>
+                </div>
+
+                <div class=\"card news\">
+                    <div class=\"tradingview-widget-container\" style=\"height:100%; width:100%\">
+                        <div class=\"tradingview-widget-container__widget\" style=\"height:100%; width:100%\"></div>
+                        <script type=\"text/javascript\"
+                            src=\"https://s3.tradingview.com/external-embedding/embed-widget-timeline.js\"
+                            async>
+                            {{
+                                \"feedMode\": \"symbol\",
+                                \"symbol\": {symbol_json},
+                                \"colorTheme\": \"dark\",
+                                \"isTransparent\": true,
+                                \"displayMode\": \"regular\",
+                                \"width\": \"100%\",
+                                \"height\": \"100%\",
+                                \"locale\": \"en\"
+                            }}
+                        </script>
+                    </div>
+                </div>
+            </div>
+
+            <div class=\"footer\"></div>
+        </div>
+        </body>
+        </html>
+        """
+
+        # Height is intentionally large enough for the full two-column dashboard so
+        # the Streamlit component itself does not become a nested scrolling window.
+        components.html(market_dashboard_html, height=1760, scrolling=False)
+
+    def apply_professional_theme():
+        """Apply a restrained, professional trading-terminal style without changing app logic."""
+        st.markdown("""
+        <style>
+            :root {
+                --alpha-bg: #0b0f14;
+                --alpha-panel: rgba(18, 24, 32, 0.88);
+                --alpha-panel-2: rgba(22, 29, 39, 0.92);
+                --alpha-border: rgba(148, 163, 184, 0.14);
+                --alpha-text: #eef2f7;
+                --alpha-muted: #8f9baa;
+                --alpha-accent: #5aa9ff;
+            }
+
+            .stApp {
+                background: radial-gradient(circle at top right, rgba(58, 110, 170, 0.10), transparent 28%),
+                            radial-gradient(circle at 15% 20%, rgba(70, 180, 150, 0.05), transparent 24%),
+                            #0b0f14;
+                color: var(--alpha-text);
+            }
+
+            [data-testid="stHeader"] {
+                background: rgba(11, 15, 20, 0.78);
+            }
+
+            [data-testid="stSidebar"] {
+                background: linear-gradient(180deg, #0b1016 0%, #0d131b 100%);
+                border-right: 1px solid var(--alpha-border);
+            }
+
+            [data-testid="stSidebar"] .block-container {
+                padding-top: 1.5rem;
+                padding-left: 1.1rem;
+                padding-right: 1.1rem;
+            }
+
+            .alpha-brand {
+                padding: 6px 0 18px 0;
+                border-bottom: 1px solid var(--alpha-border);
+                margin-bottom: 18px;
+            }
+            .alpha-brand h1 {
+                margin: 0;
+                font-size: 1.62rem;
+                letter-spacing: -0.03em;
+                color: #f7fafc;
+            }
+            .alpha-brand p {
+                margin: 5px 0 0 0;
+                color: var(--alpha-muted);
+                font-size: 0.84rem;
+            }
+
+            .alpha-section {
+                margin: 18px 0 8px 0;
+                color: #b5bfca;
+                font-size: 0.74rem;
+                font-weight: 700;
+                text-transform: uppercase;
+                letter-spacing: 0.12em;
+            }
+
+            .hero {
+                display: flex;
+                align-items: end;
+                justify-content: space-between;
+                gap: 16px;
+                margin: 6px 0 18px 0;
+                padding: 20px 22px;
+                border: 1px solid var(--alpha-border);
+                border-radius: 16px;
+                background: linear-gradient(135deg, rgba(19, 27, 37, 0.94), rgba(13, 18, 25, 0.88));
+                box-shadow: 0 12px 35px rgba(0,0,0,0.16);
+            }
+            .hero-title {
+                margin: 0;
+                font-size: 1.9rem;
+                font-weight: 750;
+                letter-spacing: -0.035em;
+            }
+            .hero-subtitle {
+                margin-top: 6px;
+                color: var(--alpha-muted);
+                font-size: 0.92rem;
+            }
+            .ticker-pill {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                padding: 8px 12px;
+                border: 1px solid rgba(90,169,255,0.24);
+                border-radius: 999px;
+                background: rgba(90,169,255,0.08);
+                color: #cfe5ff;
+                font-weight: 700;
+                font-size: 0.9rem;
+                white-space: nowrap;
+            }
+
+            .panel-label {
+                margin: 8px 0 10px 0;
+                color: #cbd5df;
+                font-size: 1.02rem;
+                font-weight: 700;
+                letter-spacing: -0.01em;
+            }
+
+            [data-testid="stTabs"] {
+                margin-top: 6px;
+            }
+            [data-testid="stTabs"] button {
+                font-weight: 650;
+                color: #96a2af;
+            }
+            [data-testid="stTabs"] button[aria-selected="true"] {
+                color: #f2f6fa;
+            }
+
+            div.stButton > button {
+                border-radius: 9px;
+                border: 1px solid rgba(148,163,184,0.18);
+                background: linear-gradient(180deg, #1b2633 0%, #151d27 100%);
+                color: #edf3f8;
+                font-weight: 650;
+                transition: all .15s ease;
+            }
+            div.stButton > button:hover {
+                border-color: rgba(90,169,255,0.45);
+                background: #1d2a39;
+            }
+
+            [data-testid="stMetric"] {
+                background: rgba(17, 24, 32, 0.72);
+                border: 1px solid var(--alpha-border);
+                border-radius: 12px;
+                padding: 12px 14px;
+            }
+
+            .stAlert {
+                border-radius: 10px;
+            }
+
+            div[data-baseweb="select"] > div,
+            div[data-baseweb="input"] > div,
+            textarea {
+                border-radius: 9px !important;
+            }
+
+            hr {
+                border-color: var(--alpha-border);
+                margin: 22px 0;
+            }
+
+            [data-testid="stDataFrame"] {
+                border: 1px solid var(--alpha-border);
+                border-radius: 12px;
+                overflow: hidden;
+            }
+        </style>
+        """, unsafe_allow_html=True)
+
+    apply_professional_theme()
+
     # --- Streamlit App UI ---
-    st.title('Alpha - Cycle Trading with Lunar Phases')
-    
-    # NEW: Welcome message and logout button
-    st.sidebar.write(f"Welcome, {st.session_state['name']}!")
-    if st.sidebar.button("Logout"):
+    # Define a safe current ticker before rendering the hero. The sidebar
+    # input is created below, so referencing ticker_input here would raise
+    # UnboundLocalError on the first run.
+    current_ticker = st.session_state.get('ticker', 'PLTR')
+
+    st.markdown(
+        f"""
+        <div class=\"hero\">
+            <div>
+                <div class=\"hero-title\">Alpha</div>
+                <div class=\"hero-subtitle\">Cycle Trading with Lunar Phases · Market & Options Intelligence</div>
+            </div>
+            <div class=\"ticker-pill\">● {current_ticker}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Professional sidebar header while preserving the existing login/logout plugin.
+    st.sidebar.markdown(
+        f"""<div class=\"alpha-brand\"><h1>ALPHA</h1><p>Trading intelligence terminal · {st.session_state['name']}</p></div>""",
+        unsafe_allow_html=True,
+    )
+    if st.sidebar.button("Logout", use_container_width=True):
         for key in st.session_state.keys():
             del st.session_state[key]
         st.rerun()
 
-    st.sidebar.title('Chart Controls')
-    st.sidebar.header("Pick a Stock:")
+    st.sidebar.markdown('<div class="alpha-section">Market</div>', unsafe_allow_html=True)
+    st.sidebar.markdown('Choose the symbol and market source.', unsafe_allow_html=True)
     ticker_input = st.sidebar.text_input('Ticker', value='PLTR').upper()
+    tv_exchange = st.sidebar.selectbox("TradingView Exchange", ["NASDAQ", "NYSE", "AMEX", "ARCA", "OTC"], index=0, help="Choose the exchange TradingView should use for the selected ticker.")
     start_date_input = st.sidebar.date_input('Start Date', value=pd.to_datetime('2025-07-01'))
     end_date_input = st.sidebar.date_input('End Date', value=dt.date.today())
     chart_type = st.sidebar.selectbox("Select Chart Type", ["Candlestick", "Line"])
 
-    st.sidebar.subheader("Moon Phases")
+    st.sidebar.markdown('<div class="alpha-section">Lunar overlay</div>', unsafe_allow_html=True)
     show_full_moon = st.sidebar.checkbox('Show Full Moon (Red)', value=True)
     show_new_moon = st.sidebar.checkbox('Show New Moon (Blue)', value=True)
     show_quarter_moon = st.sidebar.checkbox('Show Quarter Moon (Green)', value=True)
 
-    st.sidebar.subheader("Analytics")
+    st.sidebar.markdown('<div class="alpha-section">Analytics</div>', unsafe_allow_html=True)
     show_analysis = st.sidebar.checkbox('Show Lunar Analysis', value=True)
     num_price_levels = st.sidebar.number_input("Show Price Levels for Last X Cycles", min_value=0, max_value=20, value=2, step=1)
 
     if not GOOGLE_API_KEY:
-        st.sidebar.subheader("Gemini AI Configuration")
+        st.sidebar.markdown('<div class="alpha-section">Gemini AI</div>', unsafe_allow_html=True)
         user_google_key = st.sidebar.text_input("Enter your Google AI API Key", type="password")
         if user_google_key:
             GOOGLE_API_KEY = user_google_key
@@ -556,6 +1595,8 @@ def main_app():
         st.session_state.ticker = ticker_input
         st.session_state.start_date = start_date_input
         st.session_state.end_date = end_date_input
+        st.session_state.stock_data = pd.DataFrame()
+        st.session_state.all_moon_events = []
         if 'options_loaded' in st.session_state:
             del st.session_state.options_loaded
         load_data(ticker_input, start_date_input, end_date_input)
@@ -566,7 +1607,11 @@ def main_app():
         st.session_state.end_date = end_date_input
         load_data(ticker_input, start_date_input, end_date_input)
 
-    tab1, tab2, tab3 = st.tabs(["Charts & Options", "AI Analysis", "TradingView"])
+    # TradingView market tape is global and sits at the very top of the page,
+    # above all three app tabs.
+    display_top_tradingview_ticker_tape()
+
+    tab1, tab2, tab3, tab4 = st.tabs(["Charts & Options", "AI Analysis", "Market Heatmaps", "Eclipses"])
 
     fig = None
     stock_analysis_results = []
@@ -579,9 +1624,10 @@ def main_app():
             y_min, y_max = data['Low'].min(), data['High'].max()
 
             if chart_type == 'Line':
-                fig = px.line(data, x='Date', y='Adj Close', title=f"{st.session_state.get('ticker', 'N/A')} Stock Price")
+                fig = go.Figure(data=[go.Scatter(x=data['Date'].tolist(), y=data['Close'].astype(float).tolist(), mode='lines', name='Close')])
+                fig.update_layout(title_text=f"{st.session_state.get('loaded_ticker', st.session_state.get('ticker', 'N/A'))} Stock Price")
             else: 
-                fig = go.Figure(data=[go.Candlestick(x=data['Date'], open=data['Open'], high=data['High'], low=data['Low'], close=data['Close'])])
+                fig = go.Figure(data=[go.Candlestick(x=data['Date'].tolist(), open=data['Open'].astype(float).tolist(), high=data['High'].astype(float).tolist(), low=data['Low'].astype(float).tolist(), close=data['Close'].astype(float).tolist())])
                 fig.update_layout(title_text=f"{st.session_state.get('ticker', 'N/A')} Stock Price", xaxis_rangeslider_visible=False)
                 fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
             
@@ -605,10 +1651,11 @@ def main_app():
             if num_price_levels > 0 and stock_analysis_results:
                 fig = add_price_level_lines(fig, stock_analysis_results, num_price_levels)
 
-            fig.update_yaxes(range=[y_min * 0.98, y_max * 1.25])
+            fig.update_xaxes(range=[data['Date'].min(), data['Date'].max()])
+            fig.update_yaxes(range=[float(y_min) * 0.98, float(y_max) * 1.25])
             fig.update_layout(xaxis_title='Date', yaxis_title='Price (USD)')
 
-        st.header(f"Price Chart for {st.session_state.get('ticker', 'N/A')}")
+        st.markdown(f"<div class='panel-label'>Price action · {st.session_state.get('ticker', 'N/A')}</div>", unsafe_allow_html=True)
         if fig:
             st.plotly_chart(fig, use_container_width=True)
         else:
@@ -620,8 +1667,8 @@ def main_app():
 
         st.markdown("---")
 
-        st.header(f"Option Contract Lookup for {st.session_state.get('ticker', 'N/A')}")
-        st.info("This tool uses the free Polygon.io plan. Click below to load options and be mindful of the 5 API calls/minute limit.")
+        st.markdown(f"<div class='panel-label'>Options research · {st.session_state.get('ticker', 'N/A')}</div>", unsafe_allow_html=True)
+        st.caption("Polygon free-plan data · Load the chain only when needed to conserve API calls.")
         
         if 'options_loaded' not in st.session_state:
             st.session_state.options_loaded = False
@@ -629,7 +1676,7 @@ def main_app():
         if not st.session_state.options_loaded:
             if st.button("Load Options Chain"):
                 st.session_state.options_loaded = True
-                st.rerun()
+                st.experimental_rerun()
 
         if st.session_state.options_loaded:
             sorted_expirations, contract_data = get_all_contract_info_free(st.session_state.get('ticker', 'N/A'))
@@ -667,12 +1714,42 @@ def main_app():
                             st.subheader(f"Contract Price History")
                             y_min_hist, y_max_hist = history_df['Low'].min(), history_df['High'].max()
                             
+                            # Both chart types now consume the exact same
+                            # normalized option-history DataFrame.
                             if chart_type == 'Line':
-                                history_fig = px.line(history_df, x='Date', y='Close', title=f"Price History for {details['symbol']}")
+                                history_fig = go.Figure(
+                                    data=[
+                                        go.Scatter(
+                                            x=history_df['Date'].tolist(),
+                                            y=history_df['Close'].astype(float).tolist(),
+                                            mode='lines',
+                                            name='Close'
+                                        )
+                                    ]
+                                )
+                                history_fig.update_layout(
+                                    title_text=f"Price History for {details['symbol']}"
+                                )
                             else:
-                                history_fig = go.Figure(data=[go.Candlestick(x=history_df['Date'], open=history_df['Open'], high=history_df['High'], low=history_df['Low'], close=history_df['Close'])])
-                                history_fig.update_layout(title_text=f"Price History for {details['symbol']}", xaxis_rangeslider_visible=False)
-                                history_fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])])
+                                history_fig = go.Figure(
+                                    data=[
+                                        go.Candlestick(
+                                            x=history_df['Date'].tolist(),
+                                            open=history_df['Open'].astype(float).tolist(),
+                                            high=history_df['High'].astype(float).tolist(),
+                                            low=history_df['Low'].astype(float).tolist(),
+                                            close=history_df['Close'].astype(float).tolist()
+                                        )
+                                    ]
+                                )
+                                history_fig.update_layout(
+                                    title_text=f"Price History for {details['symbol']}",
+                                    xaxis_rangeslider_visible=False
+                                )
+                                history_fig.update_xaxes(
+                                    rangebreaks=[dict(bounds=["sat", "mon"])],
+                                    rangeslider_visible=False
+                                )
                             
                             all_moon_events_hist = st.session_state.get('all_moon_events', [])
                             visible_moon_events_hist = []
@@ -702,8 +1779,17 @@ def main_app():
                         elif history_df is not None:
                                 st.info("No price history found for this contract.")
 
+        # ------------------------------------------------------------
+        # TradingView market widgets belong AFTER the chart + options
+        # workflow so the user's proprietary Alpha analysis stays first.
+        # ------------------------------------------------------------
+        st.markdown("---")
+        st.markdown("<div class='panel-label'>Market intelligence</div>", unsafe_allow_html=True)
+        st.caption("Live TradingView context for the selected symbol — tape, snapshot, technicals, company profile, fundamentals, and news.")
+        display_tradingview_market_widgets(st.session_state.get('ticker', current_ticker), tv_exchange)
+
     with tab2:
-        st.header("AI Chart Analysis")
+        st.markdown("<div class='panel-label'>AI chart analysis</div>", unsafe_allow_html=True)
         
         if not GOOGLE_API_KEY:
             st.warning("Please enter your Google AI API Key in the sidebar to enable AI analysis.")
@@ -733,46 +1819,183 @@ def main_app():
                 else:
                     st.warning("Please upload at least one image to analyze.")
 
+
+
     with tab3:
-        st.header(f"TradingView Chart for {st.session_state.get('ticker', 'N/A')}")
-        st.info("You can view a live chart below, or paste a specific 'Share Link' from TradingView.com to see your saved layout.")
-        
-        tv_url = st.text_input("Paste your TradingView Chart URL here (optional):")
-        
-        if tv_url:
-            try:
-                components.iframe(tv_url, height=700, scrolling=True)
-            except Exception as e:
-                st.error(f"Could not load the URL. Please ensure it's a valid TradingView share link. Error: {e}")
-        else:
-            ticker_symbol = st.session_state.get('ticker', 'N/A')
-            
-            tradingview_widget_html = f"""
-            <div class="tradingview-widget-container" style="height:100%;width:100%">
-                <div id="tradingview_f24a1" style="height:calc(100% - 32px);width:100%"></div>
-                <script type="text/javascript" src="https://s3.tradingview.com/tv.js"></script>
-                <script type="text/javascript">
-                new TradingView.widget(
-                {{
-                "autosize": true,
-                "symbol": "{ticker_symbol}",
-                "interval": "D",
-                "timezone": "Etc/UTC",
-                "theme": "dark",
-                "style": "1",
-                "locale": "en",
-                "enable_publishing": false,
-                "allow_symbol_change": true,
-                "container_id": "tradingview_f24a1"
-            }}
-                );
-                </script>
-            </div>
+        st.markdown("<div class='panel-label'>Market heatmaps</div>", unsafe_allow_html=True)
+        st.caption("Turn individual TradingView heatmaps on or off. Disabled widgets are not loaded, which keeps the page lighter.")
+
+        # Keep widget selection in Streamlit state so each toggle persists across reruns.
+        # Use standard st.button controls instead of st.toggle so this page
+        # also works with older Streamlit versions. Each button flips the
+        # corresponding heatmap on/off and reruns the page.
+        heatmap_defaults = {
+            "show_stock_heatmap": True,
+            "show_etf_heatmap": False,
+            "show_crypto_heatmap": True,
+            "show_forex_heatmap": False,
+        }
+        for heatmap_key, default_value in heatmap_defaults.items():
+            if heatmap_key not in st.session_state:
+                st.session_state[heatmap_key] = default_value
+
+        def heatmap_toggle_button(label, key):
+            state = st.session_state[key]
+            status = "ON" if state else "OFF"
+            if st.button(f"{label}: {status}", key=f"{key}_button", use_container_width=True):
+                st.session_state[key] = not state
+                try:
+                    st.rerun()
+                except AttributeError:
+                    st.experimental_rerun()
+            return st.session_state[key]
+
+        heatmap_col1, heatmap_col2, heatmap_col3, heatmap_col4 = st.columns(4)
+        with heatmap_col1:
+            show_stock_heatmap = heatmap_toggle_button("📈 Stocks", "show_stock_heatmap")
+        with heatmap_col2:
+            show_etf_heatmap = heatmap_toggle_button("📊 ETFs", "show_etf_heatmap")
+        with heatmap_col3:
+            show_crypto_heatmap = heatmap_toggle_button("₿ Crypto", "show_crypto_heatmap")
+        with heatmap_col4:
+            show_forex_heatmap = heatmap_toggle_button("💱 Forex", "show_forex_heatmap")
+
+        if not any([show_stock_heatmap, show_etf_heatmap, show_crypto_heatmap, show_forex_heatmap]):
+            st.info("Turn on at least one heatmap above to load TradingView market data.")
+
+        def render_heatmap_widget(script_name, config, height=520):
+            """Render one TradingView heatmap only when the user enables it."""
+            config_json = json.dumps(config, separators=(",", ":"))
+            html = f"""
+            <!doctype html>
+            <html lang=\"en\">
+            <head>
+                <meta charset=\"UTF-8\">
+                <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">
+                <style>
+                    html, body {{
+                        margin: 0;
+                        padding: 0;
+                        width: 100%;
+                        height: 100%;
+                        background: transparent;
+                        overflow: hidden;
+                    }}
+                    .tradingview-widget-container,
+                    .tradingview-widget-container__widget {{
+                        width: 100% !important;
+                        height: 100% !important;
+                    }}
+                </style>
+            </head>
+            <body>
+                <div class=\"tradingview-widget-container\" style=\"height:100%;width:100%\">
+                    <div class=\"tradingview-widget-container__widget\" style=\"height:100%;width:100%\"></div>
+                    <script type=\"text/javascript\"
+                        src=\"https://s3.tradingview.com/external-embedding/{script_name}\"
+                        async>
+                        {config_json}
+                    </script>
+                </div>
+            </body>
+            </html>
             """
-            components.html(tradingview_widget_html, height=700)
+            components.html(html, height=height, scrolling=False)
+
+        if show_stock_heatmap:
+            st.markdown("### 📈 Stock Heatmap")
+            st.caption("S&P 500 stocks grouped by sector, sized by market cap and colored by daily change.")
+            render_heatmap_widget(
+                "embed-widget-stock-heatmap.js",
+                {
+                    "dataSource": "SPX500",
+                    "blockSize": "market_cap_basic",
+                    "blockColor": "change",
+                    "grouping": "sector",
+                    "locale": "en",
+                    "symbolUrl": "",
+                    "colorTheme": "dark",
+                    "exchanges": [],
+                    "hasTopBar": True,
+                    "isDataSetEnabled": True,
+                    "isZoomEnabled": True,
+                    "hasSymbolTooltip": True,
+                    "isMonoSize": False,
+                    "width": "100%",
+                    "height": "100%"
+                },
+                height=560
+            )
+
+        if show_etf_heatmap:
+            st.markdown("### 📊 ETF Heatmap")
+            st.caption("U.S. ETFs grouped by asset class, sized by volume and colored by daily change.")
+            render_heatmap_widget(
+                "embed-widget-etf-heatmap.js",
+                {
+                    "dataSource": "AllUSEtf",
+                    "blockSize": "volume",
+                    "blockColor": "change",
+                    "grouping": "asset_class",
+                    "locale": "en",
+                    "symbolUrl": "",
+                    "colorTheme": "dark",
+                    "hasTopBar": True,
+                    "isDataSetEnabled": True,
+                    "isZoomEnabled": True,
+                    "hasSymbolTooltip": True,
+                    "isMonoSize": False,
+                    "width": "100%",
+                    "height": "100%"
+                },
+                height=560
+            )
+
+        if show_crypto_heatmap:
+            st.markdown("### ₿ Crypto Heatmap")
+            st.caption("Crypto assets sized by market cap and colored by recent price change.")
+            render_heatmap_widget(
+                "embed-widget-crypto-coins-heatmap.js",
+                {
+                    "dataSource": "Crypto",
+                    "blockSize": "market_cap_calc",
+                    "blockColor": "24h_close_change|5",
+                    "locale": "en",
+                    "symbolUrl": "",
+                    "colorTheme": "dark",
+                    "hasTopBar": True,
+                    "isDataSetEnabled": True,
+                    "isZoomEnabled": True,
+                    "hasSymbolTooltip": True,
+                    "isMonoSize": False,
+                    "width": "100%",
+                    "height": "100%"
+                },
+                height=560
+            )
+
+        if show_forex_heatmap:
+            st.markdown("### 💱 Forex Heatmap")
+            st.caption("Major currencies compared in real time, with heatmap coloring for relative strength and weakness.")
+            render_heatmap_widget(
+                "embed-widget-forex-heat-map.js",
+                {
+                    "colorTheme": "dark",
+                    "isTransparent": False,
+                    "locale": "en",
+                    "currencies": ["EUR", "USD", "JPY", "GBP", "CHF", "AUD", "CAD", "NZD", "CNY"],
+                    "backgroundColor": "#0F0F0F",
+                    "width": "100%",
+                    "height": "100%"
+                },
+                height=560
+            )
+
+
+    with tab4:
+        display_eclipse_page(get_price_data, st.session_state.get('ticker', current_ticker), end_date_input)
 
 
 # --- APP ROUTING (NEW CODE) ---
 if check_login():
-
     main_app()
