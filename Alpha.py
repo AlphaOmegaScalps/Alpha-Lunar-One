@@ -17,38 +17,38 @@ import streamlit.components.v1 as components
 # --- Page Configuration (MUST be the first Streamlit command) ---
 st.set_page_config(page_title="The Alpha - Simplifying Your Trading", layout="wide", page_icon="📈")
 
-# --- USER AUTHENTICATION (NEW CODE) ---
+# --- USER AUTHENTICATION ---
 def check_login():
     """Checks if the user is logged in."""
     if not st.session_state.get("logged_in"):
-        # If not logged in, show the login form
         show_login_form()
         return False
     return True
 
+
 def show_login_form():
-    """Displays a login form."""
+    """Displays a login form using Streamlit secrets."""
     with st.form("login_form"):
         st.title("The Alpha Login")
-        username = st.text_input("Username").lower()
+        username = st.text_input("Username").lower().strip()
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
 
         if submitted:
-            # Check if the username exists and the password is correct
-            if username in st.secrets["credentials"]["usernames"] and \
-               password == st.secrets["credentials"]["usernames"][username]["password"]:
-                
-                # If login is successful, set session state
-                st.session_state["logged_in"] = True
-                st.session_state["username"] = username
-                st.session_state["name"] = st.secrets["credentials"]["usernames"][username]["name"]
-                st.rerun() # Rerun the app to show the main content
-            else:
-                st.error("Invalid username or password")
+            try:
+                users = st.secrets["credentials"]["usernames"]
+                if username in users and password == users[username]["password"]:
+                    st.session_state["logged_in"] = True
+                    st.session_state["username"] = username
+                    st.session_state["name"] = users[username]["name"]
+                    st.rerun()
+                else:
+                    st.error("Invalid username or password")
+            except (FileNotFoundError, KeyError):
+                st.error("Login credentials are not configured in Streamlit Secrets.")
 
 
-# --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
+# --- MAIN APPLICATION ---
 
 def get_eclipse_calendar_data():
     """NASA eclipse calendar data for the Eclipses page and future market studies."""
@@ -141,14 +141,14 @@ def get_historical_eclipse_study_data(start_date, end_date):
 
 
 def display_eclipse_price_study(get_price_data_func, ticker, end_date):
-    """Price history with historical eclipse markers and post-eclipse performance study."""
+    """Price history with eclipse markers, same-body phase deltas, and future eclipse projections."""
     st.markdown("### Historical Eclipse Price Study")
-    st.caption("Use custom start/end dates, toggle Solar/Lunar event verticals, and filter/sort the event database below.")
+    st.caption("Eclipse phases run from the first trading-day OPEN at one eclipse to the first trading-day OPEN at the next eclipse of the same body. Partial/total/annular subtype does not affect the phase calculation.")
 
     end_default = pd.Timestamp(end_date).date()
     start_default = (pd.Timestamp(end_date) - pd.DateOffset(years=10)).date()
 
-    date_col1, date_col2 = st.columns(2)
+    date_col1, date_col2, future_col = st.columns(3)
     with date_col1:
         study_start_date = st.date_input(
             "Study Start Date", value=start_default,
@@ -159,33 +159,38 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
             "Study End Date", value=end_default,
             max_value=dt.date.today(), key="eclipse_study_end"
         )
+    with future_col:
+        future_eclipse_count = st.number_input(
+            "Future Eclipses to Show", min_value=0, max_value=20, value=4, step=1,
+            key="eclipse_future_count"
+        )
 
     if study_start_date > study_end_date:
         st.error("Study Start Date must be on or before Study End Date.")
         return None, None
 
-    start_ts = pd.Timestamp(study_start_date)
-    end_ts = pd.Timestamp(study_end_date)
-    eclipse_df = get_historical_eclipse_study_data(start_ts, end_ts)
+    start_ts = pd.Timestamp(study_start_date).normalize()
+    end_ts = pd.Timestamp(study_end_date).normalize()
+
+    # Keep the complete in-range eclipse set for the phase/database calculations.
+    all_study_eclipses = get_historical_eclipse_study_data(start_ts, end_ts)
+    chart_eclipses = all_study_eclipses.copy()
 
     filter_col1, filter_col2, filter_col3, filter_col4 = st.columns(4)
     with filter_col1:
-        eclipse_body = st.selectbox("Eclipse Body", ["All", "Solar", "Lunar"], key="eclipse_price_body")
-    with filter_col2:
-        eclipse_types_available = sorted(eclipse_df["type"].unique().tolist()) if not eclipse_df.empty else []
-        eclipse_type = st.selectbox("Eclipse Type", ["All"] + eclipse_types_available, key="eclipse_price_type")
-    with filter_col3:
         show_solar = st.checkbox("Show Solar Verticals", value=True, key="eclipse_show_solar")
-    with filter_col4:
+    with filter_col2:
         show_lunar = st.checkbox("Show Lunar Verticals", value=True, key="eclipse_show_lunar")
+    with filter_col3:
+        show_phase_overlay = st.checkbox("Show % Delta Overlay", value=True, key="eclipse_show_delta_overlay")
+    with filter_col4:
+        num_eclipse_price_levels = st.number_input(
+            "Show Price Levels for Last X Eclipses", min_value=0, max_value=20, value=2, step=1,
+            key="eclipse_num_price_levels"
+        )
 
-    if eclipse_body != "All":
-        eclipse_df = eclipse_df[eclipse_df["kind"] == eclipse_body].copy()
-    if eclipse_type != "All":
-        eclipse_df = eclipse_df[eclipse_df["type"] == eclipse_type].copy()
-
-    # The database filters above determine which events are shown on the chart/table.
-    # Vertical toggles independently control whether Solar/Lunar markers are drawn.
+    # Load only through the selected study end. Future eclipses are markers only;
+    # no nonexistent future price data is requested.
     price_start = (start_ts - pd.Timedelta(days=7)).date()
     price_end = end_ts.date()
     with st.spinner(f"Loading {ticker} price history for the eclipse study..."):
@@ -197,8 +202,70 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
 
     price_df = price_df.copy()
     price_df["Date"] = pd.to_datetime(price_df["Date"]).dt.normalize()
-    price_df = price_df.sort_values("Date").reset_index(drop=True)
+    price_df = price_df.sort_values("Date").drop_duplicates("Date").reset_index(drop=True)
+    price_indexed = price_df.set_index("Date").sort_index()
 
+    # Resolve each eclipse to the first trading session on/after its calendar date.
+    def first_trading_session(event_date):
+        future = price_indexed[price_indexed.index >= pd.Timestamp(event_date).normalize()]
+        if future.empty:
+            return None, None
+        return future.index[0], future.iloc[0]
+
+    event_points = []
+    for _, event in all_study_eclipses.iterrows():
+        trade_date, trade_row = first_trading_session(event["date"])
+        if trade_row is not None:
+            event_points.append({
+                "calendar_date": pd.Timestamp(event["date"]).normalize(),
+                "trade_date": pd.Timestamp(trade_date).normalize(),
+                "body": event["kind"],
+                "type": event["type"],
+                "saros": int(event["saros"]),
+                "open": float(trade_row["Open"]),
+            })
+
+    # Build the same-body phase database. The phase ignores eclipse subtype.
+    phase_rows = []
+    for i, current in enumerate(event_points):
+        next_same = next((x for x in event_points[i + 1:] if x["body"] == current["body"]), None)
+        phase = {
+            "Eclipse Date": current["calendar_date"],
+            "Body": current["body"],
+            "Type": current["type"],
+            "Saros": current["saros"],
+            "Trading Date": current["trade_date"],
+            "Eclipse Open": current["open"],
+            "Next Same-Class": next_same["calendar_date"] if next_same else pd.NaT,
+            "Next Trading Date": next_same["trade_date"] if next_same else pd.NaT,
+            "Next Open": next_same["open"] if next_same else None,
+            "Delta ($)": None,
+            "Delta (%)": None,
+            "Max Profit": None,
+            "Max Drawdown": None,
+            "Status": "Open",
+        }
+
+        if next_same is not None:
+            entry = current["open"]
+            exit_open = next_same["open"]
+            delta = exit_open - entry
+            pct = (delta / entry) * 100.0 if entry else 0.0
+            phase_df = price_df[
+                (price_df["Date"] >= current["trade_date"]) &
+                (price_df["Date"] <= next_same["trade_date"])
+            ]
+            phase["Delta ($)"] = delta
+            phase["Delta (%)"] = pct
+            phase["Max Profit"] = float(phase_df["High"].max() - entry) if not phase_df.empty else None
+            phase["Max Drawdown"] = float(entry - phase_df["Low"].min()) if not phase_df.empty else None
+            phase["Status"] = "Win" if delta > 0 else "Loss"
+
+        phase_rows.append(phase)
+
+    study_df = pd.DataFrame(phase_rows)
+
+    # Chart starts with the selected historical price range.
     study_fig = go.Figure(data=[go.Candlestick(
         x=price_df["Date"].tolist(),
         open=price_df["Open"].astype(float).tolist(),
@@ -209,110 +276,131 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
     )])
 
     colors = {"Solar": "#f59e0b", "Lunar": "#8b5cf6"}
-    dash_styles = {"Total": "solid", "Annular": "dash", "Hybrid": "dashdot", "Partial": "dot", "Penumbral": "dot"}
-    for _, event in eclipse_df.iterrows():
-        event_date = event["date"]
-        if event_date < price_df["Date"].min() or event_date > price_df["Date"].max():
+
+    # Delta overlays: one translucent background block per completed same-body phase.
+    # The overlay follows the SAME Solar/Lunar visibility toggles as the verticals,
+    # and its boundaries use the eclipse calendar dates so the shading connects
+    # directly to the corresponding vertical lines.
+    if show_phase_overlay and not study_df.empty:
+        for _, row in study_df.dropna(subset=["Delta (%)", "Next Same-Class"]).iterrows():
+            body = row["Body"]
+            if body == "Solar" and not show_solar:
+                continue
+            if body == "Lunar" and not show_lunar:
+                continue
+
+            start_x = pd.Timestamp(row["Eclipse Date"]).normalize()
+            end_x = pd.Timestamp(row["Next Same-Class"]).normalize()
+            pct = float(row["Delta (%)"])
+            delta = float(row["Delta ($)"])
+            fill = "rgba(34,197,94,0.10)" if pct >= 0 else "rgba(239,68,68,0.10)"
+            text_color = "#28a745" if pct >= 0 else "#dc3545"
+
+            study_fig.add_vrect(
+                x0=start_x, x1=end_x, fillcolor=fill, line_width=0, layer="below"
+            )
+            mid_x = start_x + (end_x - start_x) / 2
+            study_fig.add_annotation(
+                x=mid_x, y=0.985, yref="paper",
+                text=f"{'+' if delta >= 0 else ''}${delta:.2f} · {'+' if pct >= 0 else ''}{pct:.2f}%",
+                showarrow=False, font=dict(size=11, color=text_color),
+                bgcolor="rgba(13,18,25,0.55)", borderpad=3
+            )
+
+    # Historical eclipse verticals. Solar/Lunar toggles control these independently.
+    for event in event_points:
+        if event["body"] == "Solar" and not show_solar:
             continue
+        if event["body"] == "Lunar" and not show_lunar:
+            continue
+        color = colors[event["body"]]
+        study_fig.add_vline(x=event["calendar_date"], line_color=color, line_dash="dash", line_width=1.5)
+        study_fig.add_annotation(
+            x=event["calendar_date"], y=1.0, yref="paper", yshift=8,
+            text=event["body"], showarrow=False, textangle=-90,
+            font=dict(size=9, color=color)
+        )
+
+    # Horizontal price levels use the OPEN of the most recent visible eclipses,
+    # matching the lunar chart's price-level behavior. Solar/Lunar visibility
+    # toggles also control their corresponding horizontal levels.
+    if int(num_eclipse_price_levels) > 0 and event_points:
+        visible_level_points = [
+            event for event in event_points
+            if (event["body"] == "Solar" and show_solar)
+            or (event["body"] == "Lunar" and show_lunar)
+        ]
+        visible_level_points = visible_level_points[-int(num_eclipse_price_levels):]
+        for event in visible_level_points:
+            color = colors[event["body"]]
+            study_fig.add_hline(
+                y=event["open"],
+                line_dash="dash",
+                line_color=color,
+                line_width=1.5,
+                annotation_text=f'{event["body"]}: ${event["open"]:.2f}',
+                annotation_position="bottom right",
+                annotation_font=dict(color=color, size=11)
+            )
+
+    # Future verticals: use the NASA calendar and show only the next X eclipses
+    # after the selected study end. They are visual markers only.
+    future_calendar = get_eclipse_calendar_data()
+    future_calendar = future_calendar[future_calendar["date"] > end_ts].sort_values("date")
+    future_calendar = future_calendar.head(int(future_eclipse_count))
+    for _, event in future_calendar.iterrows():
         if event["kind"] == "Solar" and not show_solar:
             continue
         if event["kind"] == "Lunar" and not show_lunar:
             continue
-        color = colors.get(event["kind"], "#ffffff")
-        dash = dash_styles.get(event["type"], "dot")
-        study_fig.add_vline(x=event_date, line_color=color, line_dash=dash, line_width=1.5)
+        color = colors[event["kind"]]
+        study_fig.add_vline(x=event["date"], line_color=color, line_dash="dot", line_width=1.4)
         study_fig.add_annotation(
-            x=event_date, y=1.0, yref="paper", yshift=8,
-            text=f"{event['kind']} {event['type']}", showarrow=False,
-            textangle=-90, font=dict(size=9, color=color)
+            x=event["date"], y=1.0, yref="paper", yshift=8,
+            text=f"{event['kind']} (FUTURE)", showarrow=False, textangle=-90,
+            font=dict(size=9, color=color)
         )
 
+    # Leave the x-axis wide enough to display future verticals without requesting
+    # or plotting future OHLC prices.
+    x_max = future_calendar["date"].max() if not future_calendar.empty else price_df["Date"].max()
     study_fig.update_layout(
         title=f"{ticker} — Eclipse Price History ({study_start_date} → {study_end_date})",
         xaxis_title="Date", yaxis_title="Price (USD)",
         xaxis_rangeslider_visible=False, height=700
     )
-    study_fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
+    study_fig.update_xaxes(
+        range=[price_df["Date"].min(), x_max],
+        rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False
+    )
     st.plotly_chart(study_fig, use_container_width=True)
 
-    # Event-study statistics use the first trading session on/after the eclipse date.
-    price_indexed = price_df.set_index("Date").sort_index()
-    rows = []
-    for _, event in eclipse_df.iterrows():
-        event_date = pd.Timestamp(event["date"]).normalize()
-        future = price_indexed[price_indexed.index >= event_date]
-        if future.empty:
-            continue
-        event_row = future.iloc[0]
-        event_trade_date = future.index[0]
-        event_close = float(event_row["Close"])
-        event_pos = price_df.index[price_df["Date"] == event_trade_date]
-        if len(event_pos) == 0:
-            continue
-        pos = int(event_pos[0])
-        result = {
-            "Date": event["date"], "Body": event["kind"], "Type": event["type"], "Saros": int(event["saros"]),
-            "Trading Date": event_trade_date, "Eclipse Close": event_close
-        }
-        for days in (5, 10, 20):
-            target_pos = pos + days
-            if target_pos < len(price_df):
-                future_close = float(price_df.iloc[target_pos]["Close"])
-                result[f"{days}D Return"] = (future_close / event_close - 1.0) * 100.0
-            else:
-                result[f"{days}D Return"] = None
-        rows.append(result)
-
-    study_df = pd.DataFrame(rows)
     if study_df.empty:
-        st.info("No completed eclipse events are available in the selected date range.")
+        st.info("No eclipse events overlap the selected price history.")
         return study_start_date, study_end_date
 
-    # Compare each event to the immediately previous event of the same body.
-    study_df = study_df.sort_values("Date").reset_index(drop=True)
-    study_df["Latest Same-Class"] = pd.NaT
-    study_df["Previous 20D Return"] = None
-    study_df["Result"] = "N/A"
-    for body in ["Solar", "Lunar"]:
-        idxs = study_df.index[study_df["Body"] == body].tolist()
-        for i in range(1, len(idxs)):
-            idx, prev = idxs[i], idxs[i-1]
-            study_df.at[idx, "Latest Same-Class"] = study_df.at[prev, "Date"]
-            pr, cr = study_df.at[prev, "20D Return"], study_df.at[idx, "20D Return"]
-            study_df.at[idx, "Previous 20D Return"] = pr
-            if pd.notna(pr) and pd.notna(cr):
-                study_df.at[idx, "Result"] = "WIN" if (cr > 0) == (pr > 0) else "LOSS"
-
+    # --- Eclipse Event Database ---
     st.markdown("### Eclipse Event Database")
-    st.caption("Filter and sort the database independently from the chart. WIN/LOSS compares 20-trading-day direction with the immediately previous eclipse of the same body: Lunar → Lunar, Solar → Solar.")
+    st.caption("Each row is one eclipse phase. Delta is the OPEN-to-OPEN move from that eclipse to the next eclipse of the same body. Positive rows are WINs and negative rows are LOSSes; the active phase remains OPEN until its next same-body eclipse occurs.")
 
     db1, db2, db3 = st.columns(3)
     with db1:
         db_body = st.multiselect("Filter Body", ["Solar", "Lunar"], default=["Solar", "Lunar"], key="eclipse_db_body")
     with db2:
-        db_types = sorted(study_df["Type"].unique().tolist())
-        db_type = st.multiselect("Filter Eclipse Type", db_types, default=db_types, key="eclipse_db_type")
+        db_status = st.multiselect("Filter Result", ["Win", "Loss", "Open"], default=["Win", "Loss", "Open"], key="eclipse_db_result")
     with db3:
-        db_results = st.multiselect("Filter Result", ["WIN", "LOSS", "N/A"], default=["WIN", "LOSS", "N/A"], key="eclipse_db_result")
-
-    sort_col1, sort_col2 = st.columns(2)
-    with sort_col1:
-        sort_options = ["Date", "Body", "Type", "Saros", "Trading Date", "Eclipse Close", "5D Return", "10D Return", "20D Return", "Latest Same-Class", "Previous 20D Return", "Result"]
+        sort_options = ["Eclipse Date", "Body", "Trading Date", "Eclipse Open", "Next Same-Class", "Delta ($)", "Delta (%)", "Max Profit", "Max Drawdown", "Status"]
         sort_by = st.selectbox("Sort Database By", sort_options, index=0, key="eclipse_db_sort")
-    with sort_col2:
-        sort_direction = st.radio("Sort Direction", ["Newest / Highest", "Oldest / Lowest"], horizontal=True, key="eclipse_db_direction")
+
+    sort_direction = st.radio("Sort Direction", ["Newest / Highest", "Oldest / Lowest"], horizontal=True, key="eclipse_db_direction")
 
     filtered_df = study_df.copy()
     if db_body:
         filtered_df = filtered_df[filtered_df["Body"].isin(db_body)]
     else:
         filtered_df = filtered_df.iloc[0:0]
-    if db_type:
-        filtered_df = filtered_df[filtered_df["Type"].isin(db_type)]
-    else:
-        filtered_df = filtered_df.iloc[0:0]
-    if db_results:
-        filtered_df = filtered_df[filtered_df["Result"].isin(db_results)]
+    if db_status:
+        filtered_df = filtered_df[filtered_df["Status"].isin(db_status)]
     else:
         filtered_df = filtered_df.iloc[0:0]
 
@@ -320,32 +408,35 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
     filtered_df = filtered_df.sort_values(sort_by, ascending=ascending, na_position="last").reset_index(drop=True)
 
     display_df = filtered_df.copy()
-    display_df["Date"] = display_df["Date"].dt.strftime("%Y-%m-%d")
-    display_df["Trading Date"] = display_df["Trading Date"].dt.strftime("%Y-%m-%d")
-    display_df["Latest Same-Class"] = display_df["Latest Same-Class"].apply(lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "—")
-    for col in ["Eclipse Close", "5D Return", "10D Return", "20D Return", "Previous 20D Return"]:
-        if "Return" in col:
-            display_df[col] = display_df[col].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
-        else:
-            display_df[col] = display_df[col].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+    for col in ["Eclipse Date", "Trading Date", "Next Same-Class", "Next Trading Date"]:
+        display_df[col] = pd.to_datetime(display_df[col], errors="coerce").apply(lambda x: x.strftime("%Y-%m-%d") if pd.notna(x) else "—")
+    for col in ["Eclipse Open", "Next Open", "Delta ($)", "Max Profit", "Max Drawdown"]:
+        display_df[col] = display_df[col].map(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+    for col in ["Delta (%)"]:
+        display_df[col] = display_df[col].map(lambda x: f"{x:+.2f}%" if pd.notna(x) else "N/A")
 
     def color_eclipse_row(row):
-        r = row.get("Result", "N/A")
-        bg = {"WIN": "rgba(34,197,94,.16)", "LOSS": "rgba(239,68,68,.16)"}.get(r, "")
+        status = row.get("Status", "Open")
+        bg = {"Win": "rgba(34,197,94,.16)", "Loss": "rgba(239,68,68,.16)", "Open": "rgba(148,163,184,.10)"}.get(status, "")
         return [f"background-color: {bg}" if bg else ""] * len(row)
 
     st.dataframe(display_df.style.apply(color_eclipse_row, axis=1), use_container_width=True, hide_index=True)
 
-    completed = study_df.dropna(subset=["20D Return"]).copy()
+    completed = study_df[study_df["Status"].isin(["Win", "Loss"])].copy()
     if not completed.empty:
+        wins = (completed["Delta ($)"] > 0).mean() * 100
+        avg_delta = completed["Delta ($)"].mean()
+        avg_pct = completed["Delta (%)"].mean()
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Eclipses Tracked", len(study_df))
-        c2.metric("Avg 5D Return", f"{study_df['5D Return'].dropna().mean():+.2f}%")
-        c3.metric("Avg 10D Return", f"{study_df['10D Return'].dropna().mean():+.2f}%")
-        c4.metric("Avg 20D Return", f"{completed['20D Return'].mean():+.2f}%")
+        c2.metric("Win Rate", f"{wins:.1f}%")
+        c3.metric("Avg Delta", f"{avg_delta:+.2f}")
+        c4.metric("Avg Delta %", f"{avg_pct:+.2f}%")
+
+    return study_start_date, study_end_date
 
 
-def display_eclipse_option_study(ticker, eclipse_df):
+def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func, get_single_contract_details_func, chart_type="Candlestick"):
     """Use the exact same option lookup/history workflow as Charts & Options, then overlay eclipse events."""
     st.markdown("### Eclipse Options Comparison")
     st.caption("This uses the same Polygon contract lookup and historical-data logic as the main Charts & Options section. Select the exact expiration, strike, and call/put, then compare that contract's actual gains around the eclipse dates.")
@@ -355,7 +446,7 @@ def display_eclipse_option_study(ticker, eclipse_df):
         return
 
     # EXACT SAME CONTRACT DISCOVERY LOGIC AS THE MAIN OPTIONS SECTION.
-    sorted_expirations, contract_data = get_all_contract_info_free(ticker)
+    sorted_expirations, contract_data = get_all_contract_info_func(ticker)
     if not sorted_expirations:
         st.warning(f"Could not find any option expiration dates for {ticker}.")
         return
@@ -378,7 +469,7 @@ def display_eclipse_option_study(ticker, eclipse_df):
 
     # EXACT SAME HISTORY FETCH AS THE MAIN OPTIONS SECTION.
     with st.spinner(f"Fetching {option_type.upper()} @ ${strike_price} expiring {exp_date_str}..."):
-        details, history_df = get_single_contract_details_free(
+        details, history_df = get_single_contract_details_func(
             ticker, exp_date_str, strike_price, option_type
         )
 
@@ -503,7 +594,7 @@ def display_eclipse_option_study(ticker, eclipse_df):
         b.metric("Avg 10D Option Gain", f"{option_study['10D Gain'].dropna().mean():+.2f}%")
         c.metric("Avg 20D Option Gain", f"{valid20.mean():+.2f}%")
 
-def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None):
+def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None, get_all_contract_info_func=None, get_single_contract_details_func=None, chart_type="Candlestick"):
     """Eclipse calendar, countdown, visibility feed, and NASA path map."""
     eclipse_df = get_eclipse_calendar_data()
     future_df = eclipse_df[eclipse_df["days_away"] >= 0].copy()
@@ -558,7 +649,14 @@ def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None):
 
     if study_dates and study_dates[0] is not None and study_dates[1] is not None:
         option_eclipse_df = get_historical_eclipse_study_data(study_dates[0], study_dates[1])
-        display_eclipse_option_study(ticker, option_eclipse_df)
+        if get_all_contract_info_func is not None and get_single_contract_details_func is not None:
+            display_eclipse_option_study(
+                ticker, option_eclipse_df,
+                get_all_contract_info_func, get_single_contract_details_func,
+                chart_type
+            )
+        else:
+            st.warning("Options lookup functions are unavailable for the Eclipse Options Comparison.")
 
     st.markdown("### Eclipse research")
     st.caption("Historical eclipse price studies are exploratory and do not establish causation or a trading signal.")
@@ -1112,6 +1210,11 @@ def main_app():
         
         cols_to_display = ['start_date', 'end_date', 'entry_price', 'end_price', 'pl_delta', 'pl_pct', 'max_profit', 'max_drawdown', 'status']
         display_df = df[cols_to_display].copy()
+
+        # Keep both date columns as pandas datetime64 values so Streamlit/Arrow
+        # does not receive a mixture of datetime.date and pandas Timestamp.
+        display_df["start_date"] = pd.to_datetime(display_df["start_date"], errors="coerce")
+        display_df["end_date"] = pd.to_datetime(display_df["end_date"], errors="coerce")
 
         display_df.rename(columns={
             'start_date': 'Start Date', 'end_date': 'End Date', 'entry_price': 'Entry Price',
@@ -1993,9 +2096,17 @@ def main_app():
 
 
     with tab4:
-        display_eclipse_page(get_price_data, st.session_state.get('ticker', current_ticker), end_date_input)
+        display_eclipse_page(
+            get_price_data,
+            st.session_state.get('ticker', current_ticker),
+            end_date_input,
+            get_all_contract_info_free,
+            get_single_contract_details_free,
+            chart_type
+        )
 
 
-# --- APP ROUTING (NEW CODE) ---
-if check_login():
-    main_app()
+# --- APP ROUTING ---
+if __name__ == "__main__":
+    if check_login():
+        main_app()
