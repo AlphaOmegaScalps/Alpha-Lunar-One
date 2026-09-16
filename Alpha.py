@@ -2639,7 +2639,7 @@ def main_app():
         if not st.session_state.options_loaded:
             if st.button("Load Options Chain"):
                 st.session_state.options_loaded = True
-                st.experimental_rerun()
+                
 
         if st.session_state.options_loaded:
             with st.spinner("Loading option expirations..."):
