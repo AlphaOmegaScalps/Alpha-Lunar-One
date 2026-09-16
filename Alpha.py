@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import datetime as dt
+import time
 import ephem
 from polygon import RESTClient
 from collections import defaultdict
@@ -44,8 +45,10 @@ st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", pag
 # ==============================
 # PUBLIC.COM API — DEV SETTINGS
 # ==============================
-PUBLIC_API_SECRET = "6H2L9p5dHqlQlLHZeXypOWoplfCikEYz"
 # Public credentials are loaded from Streamlit Secrets inside main_app().
+# NOTE: a live secret used to be hardcoded here. It has been removed —
+# rotate that key in your Public.com dashboard if it was ever shared,
+# and set PUBLIC_API_SECRET in .streamlit/secrets.toml instead.
 # --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
 #_______________________________________________________________________#
 # --- USER AUTHENTICATION (NEW CODE) ---
@@ -167,6 +170,61 @@ def get_historical_eclipse_study_data(start_date, end_date):
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date)
     return df[(df["date"] >= start_ts) & (df["date"] <= end_ts)].sort_values("date").reset_index(drop=True)
+
+
+def render_cycle_replay_controls(key_prefix, total_bars, *, auto_seconds=0.6):
+    """Reusable Reset / Step Back / Step Forward / Auto-Play controls.
+
+    Returns the current 0-indexed playhead position, clamped to
+    [0, total_bars - 1]. State is namespaced by key_prefix so multiple
+    independent replay widgets (price cycle, option cycle) can coexist
+    on the same page without colliding.
+    """
+    step_key = f"{key_prefix}__step"
+    playing_key = f"{key_prefix}__playing"
+
+    if step_key not in st.session_state:
+        st.session_state[step_key] = 0
+    if playing_key not in st.session_state:
+        st.session_state[playing_key] = False
+
+    max_index = max(total_bars - 1, 0)
+    st.session_state[step_key] = max(0, min(st.session_state[step_key], max_index))
+
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.3, 3])
+    with c1:
+        if st.button("⏮ Reset", key=f"{key_prefix}__reset"):
+            st.session_state[step_key] = 0
+            st.session_state[playing_key] = False
+    with c2:
+        if st.button("◀ Back", key=f"{key_prefix}__back"):
+            st.session_state[step_key] = max(0, st.session_state[step_key] - 1)
+            st.session_state[playing_key] = False
+    with c3:
+        if st.button("Fwd ▶", key=f"{key_prefix}__fwd"):
+            st.session_state[step_key] = min(max_index, st.session_state[step_key] + 1)
+            st.session_state[playing_key] = False
+    with c4:
+        play_label = "⏸ Pause" if st.session_state[playing_key] else "▶ Auto-Play"
+        if st.button(play_label, key=f"{key_prefix}__play"):
+            st.session_state[playing_key] = not st.session_state[playing_key]
+    with c5:
+        st.progress(
+            0.0 if max_index == 0 else st.session_state[step_key] / max_index,
+            text=f"Bar {st.session_state[step_key] + 1} of {total_bars}",
+        )
+
+    current_step = st.session_state[step_key]
+
+    if st.session_state[playing_key]:
+        if current_step >= max_index:
+            st.session_state[playing_key] = False
+        else:
+            time.sleep(auto_seconds)
+            st.session_state[step_key] = current_step + 1
+            st.rerun()
+
+    return current_step
 
 
 def display_eclipse_price_study(get_price_data_func, ticker, end_date):
@@ -656,6 +714,81 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
         c3.metric("Avg Delta", f"{avg_delta:+.2f}")
         c4.metric("Avg Delta %", f"{avg_pct:+.2f}%")
 
+    # --- Cycle Replay ---
+    if not completed.empty:
+        st.markdown("### Cycle Replay")
+        st.caption(
+            "Step or auto-play through one completed eclipse-to-eclipse cycle, bar by bar, "
+            "from entry (eclipse open) to the next same-body eclipse."
+        )
+
+        replay_options = [
+            f"{row['Body']} · {pd.Timestamp(row['Eclipse Date']).strftime('%Y-%m-%d')} → "
+            f"{pd.Timestamp(row['Next Same-Class']).strftime('%Y-%m-%d')} ({row['Status']})"
+            for _, row in completed.iterrows()
+        ]
+        replay_choice = st.selectbox(
+            "Cycle to replay", options=replay_options, key="eclipse_replay_cycle_select"
+        )
+        replay_row = completed.iloc[replay_options.index(replay_choice)]
+
+        cycle_bars = price_df[
+            (price_df["Date"] >= replay_row["Trading Date"]) &
+            (price_df["Date"] <= replay_row["Next Trading Date"])
+        ].reset_index(drop=True)
+
+        if len(cycle_bars) < 2:
+            st.info("Not enough trading bars in this cycle to replay.")
+        else:
+            replay_key = (
+                f"price_cycle_{replay_row['Body']}_"
+                f"{pd.Timestamp(replay_row['Eclipse Date']).strftime('%Y%m%d')}"
+            )
+            step = render_cycle_replay_controls(replay_key, len(cycle_bars))
+            visible = cycle_bars.iloc[: step + 1]
+            entry_price = float(visible.iloc[0]["Open"])
+            current_price = float(visible.iloc[-1]["Close"])
+            running_pl = current_price - entry_price
+            running_pct = (running_pl / entry_price) * 100 if entry_price else 0.0
+            running_high = float(visible["High"].max() - entry_price)
+            running_low = float(entry_price - visible["Low"].min())
+
+            r1, r2, r3, r4, r5 = st.columns(5)
+            r1.metric("Entry (eclipse open)", f"${entry_price:.2f}")
+            r2.metric("Current price", f"${current_price:.2f}", f"{running_pl:+.2f}")
+            r3.metric("P/L %", f"{running_pct:+.2f}%")
+            r4.metric("Running max profit", f"${running_high:.2f}")
+            r5.metric("Running max drawdown", f"${running_low:.2f}")
+
+            replay_fig = go.Figure(data=[go.Candlestick(
+                x=visible["Date"].tolist(),
+                open=visible["Open"].astype(float).tolist(),
+                high=visible["High"].astype(float).tolist(),
+                low=visible["Low"].astype(float).tolist(),
+                close=visible["Close"].astype(float).tolist(),
+                name=ticker,
+            )])
+            replay_fig.add_hline(
+                y=entry_price, line_dash="dash", line_color="#94a3b8",
+                annotation_text=f"Entry ${entry_price:.2f}", annotation_position="top left",
+            )
+            replay_fig.update_xaxes(
+                range=[cycle_bars["Date"].min(), cycle_bars["Date"].max()],
+                rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False,
+            )
+            replay_fig.update_layout(
+                title=f"{ticker} — {replay_row['Body']} cycle replay "
+                      f"({visible.iloc[-1]['Date'].strftime('%Y-%m-%d')})",
+                height=450, xaxis_title="Date", yaxis_title="Price (USD)",
+            )
+            st.plotly_chart(replay_fig, use_container_width=True)
+
+            if step == len(cycle_bars) - 1:
+                st.success(
+                    f"Cycle complete — {replay_row['Status']}: "
+                    f"{replay_row['Delta ($)']:+.2f} ({replay_row['Delta (%)']:+.2f}%)"
+                )
+
     return study_start_date, study_end_date
 
 
@@ -898,6 +1031,82 @@ def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func,
         b.metric("Avg 10D Option Gain", f"{option_study['10D Gain'].dropna().mean():+.2f}%")
         c.metric("Avg 20D Option Gain", f"{valid20.mean():+.2f}%")
 
+    # --- Cycle Replay — Option ---
+    st.markdown("### Cycle Replay — Option")
+    st.caption(
+        "Step or auto-play this contract's real premium from one eclipse entry through to the "
+        "next eclipse event (solar or lunar, whichever comes first). Long single-leg only for "
+        "now — multi-leg (spreads, straddles, etc.) P/L modeling is next."
+    )
+
+    sorted_events = eclipse_df.sort_values("date").reset_index(drop=True)
+    opt_replay_labels, opt_replay_windows = [], []
+    for _, row in option_study.iterrows():
+        event_date = pd.Timestamp(row["Eclipse Date"]).normalize()
+        later = sorted_events[sorted_events["date"] > event_date]
+        next_event_date = later.iloc[0]["date"] if not later.empty else history_df["Date"].max()
+        entry_date = pd.Timestamp(row["Option Entry Date"]).normalize()
+        window = history_df[
+            (history_df["Date"] >= entry_date) & (history_df["Date"] <= next_event_date)
+        ].reset_index(drop=True)
+        if len(window) < 2:
+            continue
+        opt_replay_labels.append(
+            f"{row['Body']} {option_type.upper()} · {entry_date.strftime('%Y-%m-%d')} → "
+            f"{pd.Timestamp(next_event_date).strftime('%Y-%m-%d')}"
+        )
+        opt_replay_windows.append(window)
+
+    if not opt_replay_labels:
+        st.info("Not enough contract history after any eclipse entry to replay a full cycle.")
+    else:
+        opt_choice = st.selectbox(
+            "Option cycle to replay", options=opt_replay_labels, key="eclipse_option_replay_select"
+        )
+        choice_idx = opt_replay_labels.index(opt_choice)
+        opt_window = opt_replay_windows[choice_idx]
+
+        opt_step = render_cycle_replay_controls(
+            f"option_cycle_{ticker}_{exp_date_str}_{strike_price}_{option_type}_{choice_idx}",
+            len(opt_window),
+        )
+        opt_visible = opt_window.iloc[: opt_step + 1]
+        opt_entry = float(opt_visible.iloc[0]["Close"])
+        opt_current = float(opt_visible.iloc[-1]["Close"])
+        opt_pl = opt_current - opt_entry
+        opt_pct = (opt_pl / opt_entry) * 100 if opt_entry else 0.0
+        contract_pl = opt_pl * 100  # 1 contract = 100 shares, long only, for now
+
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Entry premium", f"${opt_entry:.2f}")
+        o2.metric("Current premium", f"${opt_current:.2f}", f"{opt_pl:+.2f}")
+        o3.metric("P/L % (per share)", f"{opt_pct:+.2f}%")
+        o4.metric("P/L $ (1 contract, long)", f"${contract_pl:+,.2f}")
+
+        opt_fig = go.Figure(data=[go.Scatter(
+            x=opt_visible["Date"].tolist(),
+            y=opt_visible["Close"].astype(float).tolist(),
+            mode="lines+markers", name="Premium",
+        )])
+        opt_fig.add_hline(
+            y=opt_entry, line_dash="dash", line_color="#94a3b8",
+            annotation_text=f"Entry ${opt_entry:.2f}", annotation_position="top left",
+        )
+        opt_fig.update_xaxes(
+            range=[opt_window["Date"].min(), opt_window["Date"].max()],
+            rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False,
+        )
+        opt_fig.update_layout(
+            title=f"{ticker} {strike_price} {option_type.upper()} — cycle replay",
+            height=380, xaxis_title="Date", yaxis_title="Premium (USD)",
+        )
+        st.plotly_chart(opt_fig, use_container_width=True)
+
+        if opt_step == len(opt_window) - 1:
+            verdict = "Win" if opt_pl > 0 else "Loss"
+            st.success(f"Cycle complete — {verdict}: {opt_pl:+.2f}/share ({opt_pct:+.2f}%)")
+
+
 def render_aggrid(df, *, height=None, key=None, fit_columns=True):
     """Render an interactive, color-coded AG Grid table."""
     if df is None:
@@ -1071,17 +1280,18 @@ def main_app():
 
     # Public is now the primary market-data source. Keep the existing Polygon
     # key as a fallback so a Public/API configuration problem never destroys
-    # the existing Alpha workflow. Public credentials belong in Streamlit Secrets.
-    #try:
-        #PUBLIC_API_SECRET = st.secrets["PUBLIC_API_SECRET"]
-    #except (FileNotFoundError, KeyError):
-    #    PUBLIC_API_SECRET = ""
+    # the existing Alpha workflow. Both credentials belong in Streamlit Secrets
+    # (.streamlit/secrets.toml) — never hardcoded in source.
+    try:
+        PUBLIC_API_SECRET = st.secrets["PUBLIC_API_SECRET"]
+    except (FileNotFoundError, KeyError):
+        PUBLIC_API_SECRET = ""
+        st.sidebar.warning("PUBLIC_API_SECRET is not set in secrets — Public.com data will be unavailable.")
 
     try:
         POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
     except (FileNotFoundError, KeyError):
-        # Backward-compatible fallback for the current local build.
-        POLYGON_API_KEY = "EQYXN1ceqg4zbMsRpnIybN4AmkgtNwbW0"
+        POLYGON_API_KEY = ""
 
     PUBLIC_API_BASE = "https://api.public.com"
 
@@ -2639,7 +2849,7 @@ def main_app():
         if not st.session_state.options_loaded:
             if st.button("Load Options Chain"):
                 st.session_state.options_loaded = True
-                
+               
 
         if st.session_state.options_loaded:
             with st.spinner("Loading option expirations..."):
