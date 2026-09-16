@@ -3624,14 +3624,29 @@ def main_app():
             relative_pct = pct - underlying_pct
             u4.metric("Option vs underlying", f"{relative_pct:+.2f} pts")
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
-            x=visible["Date"].tolist(),
-            y=visible["Close"].astype(float).tolist(),
-            mode="lines+markers",
-            name=contract_label,
-            yaxis="y1",
-        ))
+        # Render the lunar option replay with the same real OHLC candlesticks
+        # used by the Eclipse option replay. The replay still advances from
+        # the master lunar playhead, so only candles available at/before the
+        # current replay date are shown.
+        if all(c in visible.columns for c in ["Open", "High", "Low", "Close"]):
+            fig = go.Figure(data=[go.Candlestick(
+                x=visible["Date"].tolist(),
+                open=pd.to_numeric(visible["Open"], errors="coerce").tolist(),
+                high=pd.to_numeric(visible["High"], errors="coerce").tolist(),
+                low=pd.to_numeric(visible["Low"], errors="coerce").tolist(),
+                close=pd.to_numeric(visible["Close"], errors="coerce").tolist(),
+                name=contract_label,
+            )])
+        else:
+            # Safe fallback when a historical source only supplies closes;
+            # do not fabricate OHLC values.
+            fig = go.Figure(data=[go.Scatter(
+                x=visible["Date"].tolist(),
+                y=pd.to_numeric(visible["Close"], errors="coerce").tolist(),
+                mode="lines+markers",
+                name=contract_label,
+                yaxis="y1",
+            )])
         fig.add_hline(
             y=entry, line_dash="dash", line_color="#94a3b8",
             annotation_text=f"Option entry ${entry:.2f}", annotation_position="top left",
@@ -3653,6 +3668,7 @@ def main_app():
         layout_kwargs = dict(
             title=f"{contract_label} — lunar cycle replay · {visible.iloc[-1]['Date'].strftime('%Y-%m-%d')}",
             height=450, xaxis_title="Date", yaxis_title="Option premium (USD)",
+            xaxis_rangeslider_visible=False,
         )
         if compare_underlying and not underlying_visible.empty:
             layout_kwargs["yaxis2"] = dict(
