@@ -39,7 +39,25 @@ except ImportError:
 
 # --- Page Configuration (MUST be the first Streamlit command) ---
 st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", page_icon="🚀")
+st.markdown("""
+<style>
+/* Hide Streamlit footer */
+footer {
+    visibility: hidden;
+}
 
+/* Hide the "Made with Streamlit" footer text */
+footer:after {
+    content: '';
+    visibility: hidden;
+}
+
+/* Hide the bottom decoration/bar */
+[data-testid="stBottomBlockContainer"] {
+    display: none;
+}
+</style>
+""", unsafe_allow_html=True)
 
 # ==============================
 # PUBLIC.COM API — DEV SETTINGS
