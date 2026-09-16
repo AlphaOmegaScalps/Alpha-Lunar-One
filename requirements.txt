@@ -4,4 +4,7 @@ plotly
 ephem
 polygon-api-client
 google-generativeai
+requests
 Pillow
+streamlit-aggrid
+public-api-sdk
