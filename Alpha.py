@@ -3,6 +3,7 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import datetime as dt
+import time
 import ephem
 from polygon import RESTClient
 from collections import defaultdict
@@ -44,8 +45,10 @@ st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", pag
 # ==============================
 # PUBLIC.COM API — DEV SETTINGS
 # ==============================
-PUBLIC_API_SECRET = "6H2L9p5dHqlQlLHZeXypOWoplfCikEYz"
 # Public credentials are loaded from Streamlit Secrets inside main_app().
+# NOTE: a live secret used to be hardcoded here. It has been removed —
+# rotate that key in your Public.com dashboard if it was ever shared,
+# and set PUBLIC_API_SECRET in .streamlit/secrets.toml instead.
 # --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
 #_______________________________________________________________________#
 # --- USER AUTHENTICATION (NEW CODE) ---
@@ -167,6 +170,61 @@ def get_historical_eclipse_study_data(start_date, end_date):
     start_ts = pd.Timestamp(start_date)
     end_ts = pd.Timestamp(end_date)
     return df[(df["date"] >= start_ts) & (df["date"] <= end_ts)].sort_values("date").reset_index(drop=True)
+
+
+def render_cycle_replay_controls(key_prefix, total_bars, *, auto_seconds=0.6):
+    """Reusable Reset / Step Back / Step Forward / Auto-Play controls.
+
+    Returns the current 0-indexed playhead position, clamped to
+    [0, total_bars - 1]. State is namespaced by key_prefix so multiple
+    independent replay widgets (price cycle, option cycle) can coexist
+    on the same page without colliding.
+    """
+    step_key = f"{key_prefix}__step"
+    playing_key = f"{key_prefix}__playing"
+
+    if step_key not in st.session_state:
+        st.session_state[step_key] = 0
+    if playing_key not in st.session_state:
+        st.session_state[playing_key] = False
+
+    max_index = max(total_bars - 1, 0)
+    st.session_state[step_key] = max(0, min(st.session_state[step_key], max_index))
+
+    c1, c2, c3, c4, c5 = st.columns([1, 1, 1, 1.3, 3])
+    with c1:
+        if st.button("⏮ Reset", key=f"{key_prefix}__reset"):
+            st.session_state[step_key] = 0
+            st.session_state[playing_key] = False
+    with c2:
+        if st.button("◀ Back", key=f"{key_prefix}__back"):
+            st.session_state[step_key] = max(0, st.session_state[step_key] - 1)
+            st.session_state[playing_key] = False
+    with c3:
+        if st.button("Fwd ▶", key=f"{key_prefix}__fwd"):
+            st.session_state[step_key] = min(max_index, st.session_state[step_key] + 1)
+            st.session_state[playing_key] = False
+    with c4:
+        play_label = "⏸ Pause" if st.session_state[playing_key] else "▶ Auto-Play"
+        if st.button(play_label, key=f"{key_prefix}__play"):
+            st.session_state[playing_key] = not st.session_state[playing_key]
+    with c5:
+        st.progress(
+            0.0 if max_index == 0 else st.session_state[step_key] / max_index,
+            text=f"Bar {st.session_state[step_key] + 1} of {total_bars}",
+        )
+
+    current_step = st.session_state[step_key]
+
+    if st.session_state[playing_key]:
+        if current_step >= max_index:
+            st.session_state[playing_key] = False
+        else:
+            time.sleep(auto_seconds)
+            st.session_state[step_key] = current_step + 1
+            st.rerun()
+
+    return current_step
 
 
 def display_eclipse_price_study(get_price_data_func, ticker, end_date):
@@ -656,6 +714,81 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
         c3.metric("Avg Delta", f"{avg_delta:+.2f}")
         c4.metric("Avg Delta %", f"{avg_pct:+.2f}%")
 
+    # --- Cycle Replay ---
+    if not completed.empty:
+        st.markdown("### Cycle Replay")
+        st.caption(
+            "Step or auto-play through one completed eclipse-to-eclipse cycle, bar by bar, "
+            "from entry (eclipse open) to the next same-body eclipse."
+        )
+
+        replay_options = [
+            f"{row['Body']} · {pd.Timestamp(row['Eclipse Date']).strftime('%Y-%m-%d')} → "
+            f"{pd.Timestamp(row['Next Same-Class']).strftime('%Y-%m-%d')} ({row['Status']})"
+            for _, row in completed.iterrows()
+        ]
+        replay_choice = st.selectbox(
+            "Cycle to replay", options=replay_options, key="eclipse_replay_cycle_select"
+        )
+        replay_row = completed.iloc[replay_options.index(replay_choice)]
+
+        cycle_bars = price_df[
+            (price_df["Date"] >= replay_row["Trading Date"]) &
+            (price_df["Date"] <= replay_row["Next Trading Date"])
+        ].reset_index(drop=True)
+
+        if len(cycle_bars) < 2:
+            st.info("Not enough trading bars in this cycle to replay.")
+        else:
+            replay_key = (
+                f"price_cycle_{replay_row['Body']}_"
+                f"{pd.Timestamp(replay_row['Eclipse Date']).strftime('%Y%m%d')}"
+            )
+            step = render_cycle_replay_controls(replay_key, len(cycle_bars))
+            visible = cycle_bars.iloc[: step + 1]
+            entry_price = float(visible.iloc[0]["Open"])
+            current_price = float(visible.iloc[-1]["Close"])
+            running_pl = current_price - entry_price
+            running_pct = (running_pl / entry_price) * 100 if entry_price else 0.0
+            running_high = float(visible["High"].max() - entry_price)
+            running_low = float(entry_price - visible["Low"].min())
+
+            r1, r2, r3, r4, r5 = st.columns(5)
+            r1.metric("Entry (eclipse open)", f"${entry_price:.2f}")
+            r2.metric("Current price", f"${current_price:.2f}", f"{running_pl:+.2f}")
+            r3.metric("P/L %", f"{running_pct:+.2f}%")
+            r4.metric("Running max profit", f"${running_high:.2f}")
+            r5.metric("Running max drawdown", f"${running_low:.2f}")
+
+            replay_fig = go.Figure(data=[go.Candlestick(
+                x=visible["Date"].tolist(),
+                open=visible["Open"].astype(float).tolist(),
+                high=visible["High"].astype(float).tolist(),
+                low=visible["Low"].astype(float).tolist(),
+                close=visible["Close"].astype(float).tolist(),
+                name=ticker,
+            )])
+            replay_fig.add_hline(
+                y=entry_price, line_dash="dash", line_color="#94a3b8",
+                annotation_text=f"Entry ${entry_price:.2f}", annotation_position="top left",
+            )
+            replay_fig.update_xaxes(
+                range=[cycle_bars["Date"].min(), cycle_bars["Date"].max()],
+                rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False,
+            )
+            replay_fig.update_layout(
+                title=f"{ticker} — {replay_row['Body']} cycle replay "
+                      f"({visible.iloc[-1]['Date'].strftime('%Y-%m-%d')})",
+                height=450, xaxis_title="Date", yaxis_title="Price (USD)",
+            )
+            st.plotly_chart(replay_fig, use_container_width=True)
+
+            if step == len(cycle_bars) - 1:
+                st.success(
+                    f"Cycle complete — {replay_row['Status']}: "
+                    f"{replay_row['Delta ($)']:+.2f} ({replay_row['Delta (%)']:+.2f}%)"
+                )
+
     return study_start_date, study_end_date
 
 
@@ -898,6 +1031,82 @@ def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func,
         b.metric("Avg 10D Option Gain", f"{option_study['10D Gain'].dropna().mean():+.2f}%")
         c.metric("Avg 20D Option Gain", f"{valid20.mean():+.2f}%")
 
+    # --- Cycle Replay — Option ---
+    st.markdown("### Cycle Replay — Option")
+    st.caption(
+        "Step or auto-play this contract's real premium from one eclipse entry through to the "
+        "next eclipse event (solar or lunar, whichever comes first). Long single-leg only for "
+        "now — multi-leg (spreads, straddles, etc.) P/L modeling is next."
+    )
+
+    sorted_events = eclipse_df.sort_values("date").reset_index(drop=True)
+    opt_replay_labels, opt_replay_windows = [], []
+    for _, row in option_study.iterrows():
+        event_date = pd.Timestamp(row["Eclipse Date"]).normalize()
+        later = sorted_events[sorted_events["date"] > event_date]
+        next_event_date = later.iloc[0]["date"] if not later.empty else history_df["Date"].max()
+        entry_date = pd.Timestamp(row["Option Entry Date"]).normalize()
+        window = history_df[
+            (history_df["Date"] >= entry_date) & (history_df["Date"] <= next_event_date)
+        ].reset_index(drop=True)
+        if len(window) < 2:
+            continue
+        opt_replay_labels.append(
+            f"{row['Body']} {option_type.upper()} · {entry_date.strftime('%Y-%m-%d')} → "
+            f"{pd.Timestamp(next_event_date).strftime('%Y-%m-%d')}"
+        )
+        opt_replay_windows.append(window)
+
+    if not opt_replay_labels:
+        st.info("Not enough contract history after any eclipse entry to replay a full cycle.")
+    else:
+        opt_choice = st.selectbox(
+            "Option cycle to replay", options=opt_replay_labels, key="eclipse_option_replay_select"
+        )
+        choice_idx = opt_replay_labels.index(opt_choice)
+        opt_window = opt_replay_windows[choice_idx]
+
+        opt_step = render_cycle_replay_controls(
+            f"option_cycle_{ticker}_{exp_date_str}_{strike_price}_{option_type}_{choice_idx}",
+            len(opt_window),
+        )
+        opt_visible = opt_window.iloc[: opt_step + 1]
+        opt_entry = float(opt_visible.iloc[0]["Close"])
+        opt_current = float(opt_visible.iloc[-1]["Close"])
+        opt_pl = opt_current - opt_entry
+        opt_pct = (opt_pl / opt_entry) * 100 if opt_entry else 0.0
+        contract_pl = opt_pl * 100  # 1 contract = 100 shares, long only, for now
+
+        o1, o2, o3, o4 = st.columns(4)
+        o1.metric("Entry premium", f"${opt_entry:.2f}")
+        o2.metric("Current premium", f"${opt_current:.2f}", f"{opt_pl:+.2f}")
+        o3.metric("P/L % (per share)", f"{opt_pct:+.2f}%")
+        o4.metric("P/L $ (1 contract, long)", f"${contract_pl:+,.2f}")
+
+        opt_fig = go.Figure(data=[go.Scatter(
+            x=opt_visible["Date"].tolist(),
+            y=opt_visible["Close"].astype(float).tolist(),
+            mode="lines+markers", name="Premium",
+        )])
+        opt_fig.add_hline(
+            y=opt_entry, line_dash="dash", line_color="#94a3b8",
+            annotation_text=f"Entry ${opt_entry:.2f}", annotation_position="top left",
+        )
+        opt_fig.update_xaxes(
+            range=[opt_window["Date"].min(), opt_window["Date"].max()],
+            rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False,
+        )
+        opt_fig.update_layout(
+            title=f"{ticker} {strike_price} {option_type.upper()} — cycle replay",
+            height=380, xaxis_title="Date", yaxis_title="Premium (USD)",
+        )
+        st.plotly_chart(opt_fig, use_container_width=True)
+
+        if opt_step == len(opt_window) - 1:
+            verdict = "Win" if opt_pl > 0 else "Loss"
+            st.success(f"Cycle complete — {verdict}: {opt_pl:+.2f}/share ({opt_pct:+.2f}%)")
+
+
 def render_aggrid(df, *, height=None, key=None, fit_columns=True):
     """Render an interactive, color-coded AG Grid table."""
     if df is None:
@@ -1071,17 +1280,18 @@ def main_app():
 
     # Public is now the primary market-data source. Keep the existing Polygon
     # key as a fallback so a Public/API configuration problem never destroys
-    # the existing Alpha workflow. Public credentials belong in Streamlit Secrets.
-    #try:
-        #PUBLIC_API_SECRET = st.secrets["PUBLIC_API_SECRET"]
-    #except (FileNotFoundError, KeyError):
-    #    PUBLIC_API_SECRET = ""
+    # the existing Alpha workflow. Both credentials belong in Streamlit Secrets
+    # (.streamlit/secrets.toml) — never hardcoded in source.
+    try:
+        PUBLIC_API_SECRET = st.secrets["PUBLIC_API_SECRET"]
+    except (FileNotFoundError, KeyError):
+        PUBLIC_API_SECRET = ""
+        st.sidebar.warning("PUBLIC_API_SECRET is not set in secrets — Public.com data will be unavailable.")
 
     try:
         POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
     except (FileNotFoundError, KeyError):
-        # Backward-compatible fallback for the current local build.
-        POLYGON_API_KEY = "EQYXN1ceqg4zbMsRpnIybN4AmkgtNwbW0"
+        POLYGON_API_KEY = ""
 
     PUBLIC_API_BASE = "https://api.public.com"
 
@@ -1302,6 +1512,112 @@ def main_app():
         df["Adj Close"] = df["Close"].astype(float)
         return df.reset_index(drop=True)
 
+    @st.cache_data(ttl=5 * 60, show_spinner=False)
+    def get_account_transactions(_public_account_id, start_date, end_date):
+        """Pull every filled TRADE transaction for the account in [start_date, end_date].
+
+        Paginates through GET /userapigateway/trading/{accountId}/history and
+        returns a flat DataFrame: timestamp, symbol, security_type, side,
+        quantity, price (principal / quantity, falling back to net amount).
+        """
+        if not _public_account_id:
+            return pd.DataFrame()
+
+        start_iso = pd.Timestamp(start_date).tz_localize("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_iso = (pd.Timestamp(end_date) + pd.Timedelta(days=1)).tz_localize("UTC").strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        rows, next_token = [], None
+        for _ in range(50):  # hard cap so a pagination bug can't loop forever
+            params = {"start": start_iso, "end": end_iso, "pageSize": 250}
+            if next_token:
+                params["nextToken"] = next_token
+            payload = public_request(
+                "GET", f"/userapigateway/trading/{_public_account_id}/history", params=params
+            )
+            for txn in payload.get("transactions", []) or []:
+                if txn.get("type") != "TRADE":
+                    continue
+                try:
+                    quantity = abs(float(txn.get("quantity") or 0))
+                except (TypeError, ValueError):
+                    continue
+                if quantity == 0:
+                    continue
+                principal = txn.get("principalAmount")
+                net = txn.get("netAmount")
+                try:
+                    price = abs(float(principal)) / quantity if principal not in (None, "") else abs(float(net)) / quantity
+                except (TypeError, ValueError, ZeroDivisionError):
+                    continue
+                rows.append({
+                    "timestamp": pd.Timestamp(txn.get("timestamp")),
+                    "symbol": txn.get("symbol"),
+                    "security_type": txn.get("securityType", "EQUITY"),
+                    "side": txn.get("side"),
+                    "quantity": quantity,
+                    "price": price,
+                })
+            next_token = payload.get("nextToken")
+            if not next_token:
+                break
+
+        if not rows:
+            return pd.DataFrame(columns=["timestamp", "symbol", "security_type", "side", "quantity", "price"])
+        return pd.DataFrame(rows).sort_values("timestamp").reset_index(drop=True)
+
+    def build_round_trip_trades(transactions_df):
+        """FIFO-pair BUY/SELL fills per symbol into entry->exit round trips.
+
+        Works for both long (BUY opens, SELL closes) and short (SELL opens,
+        BUY closes) round trips. Partial fills are split across multiple
+        resulting rows as needed.
+        """
+        if transactions_df is None or transactions_df.empty:
+            return pd.DataFrame()
+
+        trades = []
+        for symbol, group in transactions_df.groupby("symbol"):
+            open_lots = []  # list of dicts: side, qty, price, timestamp
+            for _, txn in group.sort_values("timestamp").iterrows():
+                side = txn["side"]
+                qty_remaining = txn["quantity"]
+                price = txn["price"]
+                timestamp = txn["timestamp"]
+
+                while qty_remaining > 1e-9 and open_lots and open_lots[0]["side"] != side:
+                    lot = open_lots[0]
+                    matched_qty = min(lot["qty"], qty_remaining)
+                    entry_side = lot["side"]
+                    sign = 1.0 if entry_side == "BUY" else -1.0
+                    realized_pl = (price - lot["price"]) * matched_qty * sign
+                    entry_price = lot["price"] * matched_qty
+                    exit_notional = price * matched_qty
+                    trades.append({
+                        "Symbol": symbol,
+                        "Security Type": txn["security_type"],
+                        "Direction": "Long" if entry_side == "BUY" else "Short",
+                        "Entry Date": lot["timestamp"],
+                        "Entry Price": lot["price"],
+                        "Exit Date": timestamp,
+                        "Exit Price": price,
+                        "Quantity": matched_qty,
+                        "Realized P/L ($)": realized_pl,
+                        "Realized P/L (%)": (realized_pl / entry_price * 100.0) if entry_price else 0.0,
+                    })
+                    lot["qty"] -= matched_qty
+                    qty_remaining -= matched_qty
+                    if lot["qty"] <= 1e-9:
+                        open_lots.pop(0)
+
+                if qty_remaining > 1e-9:
+                    open_lots.append({"side": side, "qty": qty_remaining, "price": price, "timestamp": timestamp})
+
+        if not trades:
+            return pd.DataFrame()
+        result = pd.DataFrame(trades)
+        result["Status"] = result["Realized P/L ($)"].apply(lambda x: "Win" if x > 0 else "Loss")
+        return result.sort_values("Entry Date").reset_index(drop=True)
+
     def get_price_data(ticker, start_date, end_date):
         """Fetch one canonical OHLCV DataFrame for both charting and lunar analysis.
 
@@ -1347,6 +1663,156 @@ def main_app():
         except Exception as e:
             st.error(f"Failed to retrieve price data for {ticker}: {e}")
             return pd.DataFrame()
+
+    def display_algo_trade_replay():
+        """Step or auto-play through real, closed round-trip trades pulled
+        straight from the Public.com account history — equities and options
+        alike — instead of a synthetic or purely eclipse-derived window.
+        """
+        st.markdown("### Algo Trade Replay")
+        st.caption(
+            "Reconstructs closed round-trip trades (FIFO BUY/SELL matching) from your actual "
+            "Public.com account history, then replays each one bar by bar against real price "
+            "history from entry to exit."
+        )
+
+        if not PUBLIC_API_SECRET:
+            st.warning("Public.com account is not connected — check PUBLIC_API_SECRET in secrets.")
+            return
+        account_id_for_replay = get_public_account_id(PUBLIC_API_SECRET)
+        if not account_id_for_replay:
+            st.warning("Could not resolve a Public.com account ID for trade history.")
+            return
+
+        d1, d2 = st.columns(2)
+        with d1:
+            trade_start = st.date_input(
+                "History Start Date", value=dt.date.today() - dt.timedelta(days=90),
+                max_value=dt.date.today(), key="algo_trade_start",
+            )
+        with d2:
+            trade_end = st.date_input(
+                "History End Date", value=dt.date.today(),
+                max_value=dt.date.today(), key="algo_trade_end",
+            )
+        if trade_start > trade_end:
+            st.error("History Start Date must be on or before History End Date.")
+            return
+
+        with st.spinner("Loading account trade history..."):
+            try:
+                transactions_df = get_account_transactions(account_id_for_replay, trade_start, trade_end)
+            except Exception as history_error:
+                st.error(f"Could not load account history: {history_error}")
+                return
+
+        round_trips = build_round_trip_trades(transactions_df)
+        if round_trips.empty:
+            st.info("No closed round-trip trades found in this date range.")
+            return
+
+        st.markdown("#### Closed Trades")
+        trade_table = round_trips.copy()
+        trade_table["Entry Date"] = pd.to_datetime(trade_table["Entry Date"]).dt.strftime("%Y-%m-%d %H:%M")
+        trade_table["Exit Date"] = pd.to_datetime(trade_table["Exit Date"]).dt.strftime("%Y-%m-%d %H:%M")
+        for col in ["Entry Price", "Exit Price", "Realized P/L ($)"]:
+            trade_table[col] = trade_table[col].map(lambda x: f"${x:,.2f}")
+        trade_table["Realized P/L (%)"] = trade_table["Realized P/L (%)"].map(lambda x: f"{x:+.2f}%")
+        trade_table["Quantity"] = trade_table["Quantity"].map(lambda x: f"{x:g}")
+        render_aggrid(trade_table, height=320, key="algo_trade_history_grid")
+
+        wins = (round_trips["Realized P/L ($)"] > 0).mean() * 100
+        w1, w2, w3 = st.columns(3)
+        w1.metric("Closed Trades", len(round_trips))
+        w2.metric("Win Rate", f"{wins:.1f}%")
+        w3.metric("Total Realized P/L", f"${round_trips['Realized P/L ($)'].sum():,.2f}")
+
+        st.markdown("#### Replay a Trade")
+        trade_labels = [
+            f"{row['Symbol']} · {row['Direction']} · "
+            f"{pd.Timestamp(row['Entry Date']).strftime('%Y-%m-%d')} → "
+            f"{pd.Timestamp(row['Exit Date']).strftime('%Y-%m-%d')} ({row['Status']})"
+            for _, row in round_trips.iterrows()
+        ]
+        trade_choice = st.selectbox("Trade to replay", options=trade_labels, key="algo_trade_replay_select")
+        trade_row = round_trips.iloc[trade_labels.index(trade_choice)]
+
+        entry_date = pd.Timestamp(trade_row["Entry Date"]).normalize()
+        exit_date = pd.Timestamp(trade_row["Exit Date"]).normalize()
+
+        with st.spinner("Loading replay price history..."):
+            if trade_row["Security Type"] == "OPTION":
+                try:
+                    period = _public_period_for_range(entry_date.date(), exit_date.date())
+                    payload = public_request(
+                        "GET", f"/userapigateway/historicdata/OPTION/{trade_row['Symbol']}/{period}"
+                    )
+                    replay_bars = _public_bars_to_ohlcv(payload, entry_date.date(), exit_date.date())
+                except Exception as option_history_error:
+                    st.warning(f"Could not load option history for {trade_row['Symbol']}: {option_history_error}")
+                    replay_bars = pd.DataFrame()
+            else:
+                replay_bars = get_price_data(trade_row["Symbol"], entry_date.date(), exit_date.date())
+
+        if replay_bars is None or len(replay_bars) < 2:
+            st.info("Not enough bar history between entry and exit to replay this trade.")
+            return
+
+        replay_key = (
+            f"algo_trade_{trade_row['Symbol']}_{entry_date.strftime('%Y%m%d%H%M')}_"
+            f"{exit_date.strftime('%Y%m%d%H%M')}"
+        )
+        step = render_cycle_replay_controls(replay_key, len(replay_bars))
+        visible = replay_bars.iloc[: step + 1]
+
+        entry_fill = float(trade_row["Entry Price"])
+        current_price = float(visible.iloc[-1]["Close"])
+        sign = 1.0 if trade_row["Direction"] == "Long" else -1.0
+        qty = float(trade_row["Quantity"])
+        multiplier = 100 if trade_row["Security Type"] == "OPTION" else 1
+        running_pl = (current_price - entry_fill) * sign * qty * multiplier
+        running_pct = ((current_price - entry_fill) / entry_fill) * 100 * sign if entry_fill else 0.0
+
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Entry fill", f"${entry_fill:.2f}")
+        m2.metric("Current price", f"${current_price:.2f}")
+        m3.metric("Live P/L %", f"{running_pct:+.2f}%")
+        m4.metric("Live P/L $", f"${running_pl:+,.2f}")
+
+        replay_fig = go.Figure(data=[go.Candlestick(
+            x=visible["Date"].tolist(),
+            open=visible["Open"].astype(float).tolist(),
+            high=visible["High"].astype(float).tolist(),
+            low=visible["Low"].astype(float).tolist(),
+            close=visible["Close"].astype(float).tolist(),
+            name=trade_row["Symbol"],
+        )])
+        replay_fig.add_hline(
+            y=entry_fill, line_dash="dash", line_color="#94a3b8",
+            annotation_text=f"Entry fill ${entry_fill:.2f}", annotation_position="top left",
+        )
+        try:
+            window_eclipses = get_historical_eclipse_study_data(entry_date, exit_date)
+            for _, event in window_eclipses.iterrows():
+                color = "#f59e0b" if event["kind"] == "Solar" else "#8b5cf6"
+                replay_fig.add_vline(x=event["date"], line_color=color, line_dash="dot", line_width=1.2)
+        except Exception:
+            pass  # eclipse overlay is decorative only; never block the replay on it
+        replay_fig.update_xaxes(
+            range=[replay_bars["Date"].min(), replay_bars["Date"].max()],
+            rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False,
+        )
+        replay_fig.update_layout(
+            title=f"{trade_row['Symbol']} — {trade_row['Direction']} trade replay",
+            height=450, xaxis_title="Date", yaxis_title="Price (USD)",
+        )
+        st.plotly_chart(replay_fig, use_container_width=True)
+
+        if step == len(replay_bars) - 1:
+            st.success(
+                f"Trade complete — {trade_row['Status']}: "
+                f"${trade_row['Realized P/L ($)']:+,.2f} ({trade_row['Realized P/L (%)']:+.2f}%) realized"
+            )
 
     def add_moon_phases_to_fig(fig, visible_events):
         """Draws vertical lines on the chart for each moon event."""
@@ -2574,7 +3040,9 @@ def main_app():
     # above all three app tabs.
     display_top_tradingview_ticker_tape()
 
-    tab1, tab2, tab3, tab4 = st.tabs(["Charts & Options", "AI Analysis", "Market Heatmaps", "Eclipses"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+        ["Charts & Options", "AI Analysis", "Market Heatmaps", "Eclipses", "Algo Trades"]
+    )
 
     fig = None
     stock_analysis_results = []
@@ -2639,7 +3107,7 @@ def main_app():
         if not st.session_state.options_loaded:
             if st.button("Load Options Chain"):
                 st.session_state.options_loaded = True
-                
+               
 
         if st.session_state.options_loaded:
             with st.spinner("Loading option expirations..."):
@@ -3282,6 +3750,9 @@ def main_app():
             get_public_option_chain,
             chart_type
         )
+
+    with tab5:
+        display_algo_trade_replay()
 
 
 # --- APP ROUTING (NEW CODE) ---
