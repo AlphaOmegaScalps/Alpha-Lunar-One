@@ -13,44 +13,71 @@ import base64
 import json
 import re
 import streamlit.components.v1 as components
+import requests
+
+try:
+    from st_aggrid import AgGrid, GridOptionsBuilder, JsCode
+    AGGRID_AVAILABLE = True
+except ImportError:
+    AGGRID_AVAILABLE = False
+
+# Official Public.com Python SDK (optional at import time so Polygon/REST fallback
+# still works if the SDK has not yet been installed locally).
+try:
+    from public_api_sdk import (
+        PublicApiClient,
+        PublicApiClientConfiguration,
+        OrderInstrument,
+        InstrumentType,
+        OptionExpirationsRequest,
+        OptionChainRequest,
+    )
+    from public_api_sdk.auth_config import ApiKeyAuthConfig
+    PUBLIC_SDK_AVAILABLE = True
+except ImportError:
+    PUBLIC_SDK_AVAILABLE = False
 
 # --- Page Configuration (MUST be the first Streamlit command) ---
-st.set_page_config(page_title="The Alpha - Simplifying Your Trading", layout="wide", page_icon="📈")
+st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", page_icon="🚀")
 
 
-
-# --- USER AUTHENTICATION ---
+# ==============================
+# PUBLIC.COM API — DEV SETTINGS
+# ==============================
+PUBLIC_API_SECRET = "6H2L9p5dHqlQlLHZeXypOWoplfCikEYz"
+# Public credentials are loaded from Streamlit Secrets inside main_app().
+# --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
+#_______________________________________________________________________#
+# --- USER AUTHENTICATION (NEW CODE) ---
 def check_login():
     """Checks if the user is logged in."""
     if not st.session_state.get("logged_in"):
+        # If not logged in, show the login form
         show_login_form()
         return False
     return True
 
-
 def show_login_form():
-    """Displays a login form using Streamlit Secrets."""
+    """Displays a login form."""
     with st.form("login_form"):
         st.title("The Alpha Login")
-        username = st.text_input("Username").lower().strip()
+        username = st.text_input("Username").lower()
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
 
         if submitted:
-            try:
-                users = st.secrets["credentials"]["usernames"]
-                if username in users and password == users[username]["password"]:
-                    st.session_state["logged_in"] = True
-                    st.session_state["username"] = username
-                    st.session_state["name"] = users[username]["name"]
-                    st.rerun()
-                else:
-                    st.error("Invalid username or password")
-            except (FileNotFoundError, KeyError):
-                st.error("Login credentials are not configured in Streamlit Secrets.")
+            # Check if the username exists and the password is correct
+            if username in st.secrets["credentials"]["usernames"] and \
+               password == st.secrets["credentials"]["usernames"][username]["password"]:
+                
+                # If login is successful, set session state
+                st.session_state["logged_in"] = True
+                st.session_state["username"] = username
+                st.session_state["name"] = st.secrets["credentials"]["usernames"][username]["name"]
+                st.rerun() # Rerun the app to show the main content
+            else:
+                st.error("Invalid username or password")
 
-
-# --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
 
 def get_eclipse_calendar_data():
     """NASA eclipse calendar data for the Eclipses page and future market studies."""
@@ -550,7 +577,7 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
                 formatted_behavior[col] = formatted_behavior[col].map(lambda x: f"${x:,.2f}")
             formatted_behavior["Return (%)"] = formatted_behavior["Return (%)"].map(lambda x: f"{x:+.2f}%")
 
-            st.dataframe(formatted_behavior, use_container_width=True, hide_index=True)
+            render_aggrid(formatted_behavior, height=360, key="eclipse_behavior_grid")
 
             summary = third_df[third_df["Body"].isin(behavior_body) & third_df["Third"].isin(behavior_third)].copy()
             if not summary.empty:
@@ -569,7 +596,7 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
                     summary_display[col] = summary_display[col].map(lambda x: f"{x:+.2f}%")
                 for col in ["Avg Max Profit $", "Avg Max Drawdown $"]:
                     summary_display[col] = summary_display[col].map(lambda x: f"${x:,.2f}")
-                st.dataframe(summary_display, use_container_width=True, hide_index=True)
+                render_aggrid(summary_display, height=260, key="eclipse_summary_grid")
 
     if study_df.empty:
         st.info("No eclipse events overlap the selected price history.")
@@ -616,7 +643,7 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
         bg = {"Win": "rgba(34,197,94,.16)", "Loss": "rgba(239,68,68,.16)", "Open": "rgba(148,163,184,.10)"}.get(status, "")
         return [f"background-color: {bg}" if bg else ""] * len(row)
 
-    st.dataframe(display_df.style.apply(color_eclipse_row, axis=1), use_container_width=True, hide_index=True)
+    render_aggrid(display_df, height=420, key="eclipse_database_grid")
 
     completed = study_df[study_df["Status"].isin(["Win", "Loss"])].copy()
     if not completed.empty:
@@ -632,35 +659,103 @@ def display_eclipse_price_study(get_price_data_func, ticker, end_date):
     return study_start_date, study_end_date
 
 
-def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func, get_single_contract_details_func, chart_type="Candlestick"):
+def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func, get_single_contract_details_func, get_option_chain_func=None, chart_type="Candlestick"):
     """Use the exact same option lookup/history workflow as Charts & Options, then overlay eclipse events."""
     st.markdown("### Eclipse Options Comparison")
-    st.caption("This uses the same Polygon contract lookup and historical-data logic as the main Charts & Options section. Select the exact expiration, strike, and call/put, then compare that contract's actual gains around the eclipse dates.")
+    st.caption("This uses the same Public/Polygon contract lookup and historical-data logic as the main Charts & Options section. Select the exact expiration, strike, and call/put, then compare that contract's actual gains around the eclipse dates.")
 
     if not ticker:
         st.info("Select a stock ticker first.")
         return
 
-    # EXACT SAME CONTRACT DISCOVERY LOGIC AS THE MAIN OPTIONS SECTION.
+    # Mirror the main Options Lookup: Public supplies expirations, the selected
+    # expiration loads the complete chain, and the user can narrow the strike range.
     sorted_expirations, contract_data = get_all_contract_info_func(ticker)
     if not sorted_expirations:
         st.warning(f"Could not find any option expiration dates for {ticker}.")
         return
 
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        exp_date_str = st.selectbox("Select Expiration Date", options=sorted_expirations, key="eclipse_option_exp")
-    strikes = contract_data.get(exp_date_str, [])
-    if not strikes:
+    exp_date_str = st.selectbox(
+        "Select Expiration Date", options=sorted_expirations, key="eclipse_option_exp"
+    )
+
+    try:
+        selected_chain = get_option_chain_func(ticker, exp_date_str) if get_option_chain_func is not None else None
+        chain_rows = []
+        if selected_chain is not None:
+            # _chain_contract_rows() belongs to main_app(), so normalize the
+            # already-fetched Public chain locally for the Eclipse selector.
+            def _eclipse_strike(contract):
+                if isinstance(contract, dict):
+                    details = contract.get("optionDetails", {})
+                    strike = contract.get("strikePrice", contract.get("strike"))
+                else:
+                    details = getattr(contract, "optionDetails", {})
+                    strike = getattr(contract, "strikePrice", getattr(contract, "strike", None))
+                if isinstance(details, dict):
+                    strike = details.get("strikePrice", strike)
+                else:
+                    strike = getattr(details, "strikePrice", strike)
+                try:
+                    return float(strike) if strike not in (None, "") else None
+                except (TypeError, ValueError):
+                    return None
+
+            if isinstance(selected_chain, dict):
+                for contract in selected_chain.get("calls", []) or []:
+                    strike = _eclipse_strike(contract)
+                    if strike is not None:
+                        chain_rows.append({"type": "call", "strike": strike})
+                for contract in selected_chain.get("puts", []) or []:
+                    strike = _eclipse_strike(contract)
+                    if strike is not None:
+                        chain_rows.append({"type": "put", "strike": strike})
+            else:
+                for contract in getattr(selected_chain, "calls", []) or []:
+                    strike = _eclipse_strike(contract)
+                    if strike is not None:
+                        chain_rows.append({"type": "call", "strike": strike})
+                for contract in getattr(selected_chain, "puts", []) or []:
+                    strike = _eclipse_strike(contract)
+                    if strike is not None:
+                        chain_rows.append({"type": "put", "strike": strike})
+        eclipse_chain_df = pd.DataFrame(chain_rows)
+    except Exception as chain_error:
+        st.warning(f"Could not load option chain for {exp_date_str}: {chain_error}")
+        eclipse_chain_df = pd.DataFrame()
+
+    if eclipse_chain_df.empty:
+        strikes = contract_data.get(exp_date_str, [])
+        eclipse_chain_df = pd.DataFrame([{"strike": s} for s in strikes])
+
+    all_strikes = []
+    if not eclipse_chain_df.empty and "strike" in eclipse_chain_df.columns:
+        all_strikes = sorted(pd.to_numeric(eclipse_chain_df["strike"], errors="coerce").dropna().unique().tolist())
+    if not all_strikes:
         st.warning("No strikes found for this expiration.")
         return
-    with col2:
-        strike_price = st.selectbox("Select Strike Price", options=strikes, key="eclipse_option_strike")
-    with col3:
-        option_type = st.radio("Select Option Type", ["call", "put"], horizontal=True, key="eclipse_option_type")
+
+    st.markdown("**Strike Range Filter**")
+    range_col1, range_col2 = st.columns(2)
+    with range_col1:
+        user_min_strike = st.number_input(
+            "Min Strike", value=float(all_strikes[0]), step=1.0, key="eclipse_min_strike"
+        )
+    with range_col2:
+        user_max_strike = st.number_input(
+            "Max Strike", value=float(all_strikes[-1]), step=1.0, key="eclipse_max_strike"
+        )
+
+    strikes = [s for s in all_strikes if user_min_strike <= s <= user_max_strike]
+    if not strikes:
+        st.warning("No strikes found within your custom range. Resetting to full range.")
+        strikes = all_strikes
+
+    strike_price = st.selectbox("Select Strike Price", options=strikes, key="eclipse_option_strike")
+    option_type = st.radio("Select Option Type", ["call", "put"], horizontal=True, key="eclipse_option_type")
 
     if not st.button("Fetch Contract Details", key="eclipse_option_fetch"):
-        st.info("Choose an expiration, strike, and call/put, then click Fetch Contract Details.")
+        st.info("Choose an expiration, strike range, strike, and call/put, then click Fetch Contract Details.")
         return
 
     # EXACT SAME HISTORY FETCH AS THE MAIN OPTIONS SECTION.
@@ -794,7 +889,7 @@ def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func,
             return ["background-color: rgba(239,68,68,.16)"] * len(row)
         return [""] * len(row)
 
-    st.dataframe(option_display.style.apply(color_option_row, axis=1), use_container_width=True, hide_index=True)
+    render_aggrid(option_display, height=300, key="eclipse_option_gain_grid")
 
     valid20 = option_study["20D Gain"].dropna()
     if not valid20.empty:
@@ -803,7 +898,102 @@ def display_eclipse_option_study(ticker, eclipse_df, get_all_contract_info_func,
         b.metric("Avg 10D Option Gain", f"{option_study['10D Gain'].dropna().mean():+.2f}%")
         c.metric("Avg 20D Option Gain", f"{valid20.mean():+.2f}%")
 
-def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None, get_all_contract_info_func=None, get_single_contract_details_func=None, chart_type="Candlestick"):
+def render_aggrid(df, *, height=None, key=None, fit_columns=True):
+    """Render an interactive, color-coded AG Grid table."""
+    if df is None:
+        return
+    display = df.copy()
+    if not AGGRID_AVAILABLE:
+        st.warning("AG Grid is not installed. Add `streamlit-aggrid` to the app dependencies.")
+        st.dataframe(display, use_container_width=True, hide_index=True)
+        return
+    gb = GridOptionsBuilder.from_dataframe(display)
+    gb.configure_default_column(
+        sortable=True, filter=True, resizable=True, minWidth=95,
+        wrapText=False, autoHeight=False,
+    )
+    gb.configure_grid_options(
+        animateRows=False,
+        enableRangeSelection=True,
+        suppressRowClickSelection=True,
+        rowHeight=32,
+        headerHeight=38,
+    )
+    if "Strike" in display.columns:
+        gb.configure_column("Strike", pinned="left", width=105, lockPinned=True)
+    elif "Expiration Date" in display.columns:
+        gb.configure_column("Expiration Date", pinned="left", width=125, lockPinned=True)
+    cell_style = JsCode(r"""
+    function(params) {
+        const c = params.colDef.field || '';
+        const v = params.value;
+        const style = {};
+        if (c === 'Strike' || c === 'Expiration Date') {
+            style.fontWeight = '700';
+            style.color = '#f1c40f';
+            style.backgroundColor = 'rgba(241,196,15,0.06)';
+        }
+        if (c.includes('Call')) {
+            style.color = '#2ecc71';
+            style.backgroundColor = 'rgba(46,204,113,0.06)';
+        }
+        if (c.includes('Put')) {
+            style.color = '#e74c3c';
+            style.backgroundColor = 'rgba(231,76,60,0.06)';
+        }
+        if (c.includes('Net') || c.includes('Delta') || c.includes('Return') || c.includes('Gain') || c.includes('P/L')) {
+            const n = Number(v);
+            if (!Number.isNaN(n)) style.color = n > 0 ? '#2ecc71' : (n < 0 ? '#e74c3c' : '#cbd5e1');
+        }
+        if (c === 'Status' || c === 'Result') {
+            const t = String(v || '').toLowerCase();
+            if (t === 'win') { style.color='#2ecc71'; style.fontWeight='700'; style.backgroundColor='rgba(46,204,113,0.12)'; }
+            if (t === 'loss') { style.color='#e74c3c'; style.fontWeight='700'; style.backgroundColor='rgba(231,76,60,0.12)'; }
+            if (t === 'open') { style.color='#94a3b8'; style.fontWeight='700'; }
+        }
+        return style;
+    }
+    """)
+    for col in display.columns:
+        gb.configure_column(col, cellStyle=cell_style)
+    formatter = JsCode(r"""
+    function(params) {
+        if (params.value === null || params.value === undefined || params.value === '') return '—';
+        const c = params.colDef.field || '';
+        const n = Number(params.value);
+        if (Number.isNaN(n)) return params.value;
+        if (c.includes('%') || c.includes('Return') || c.includes('Gain') || c.includes('Rate'))
+            return n.toFixed(2) + '%';
+        if (c.includes('Strike') || c.includes('Price') || c.includes('Open') || c.includes('Close') ||
+            c.includes('Bid') || c.includes('Ask') || c.includes('Last') || c.includes('Support') ||
+            c.includes('Resistance') || c.includes('Level') || c.includes('Expected'))
+            return '$' + n.toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+        if (c.includes('DEX') || c.includes('GEX') || c.includes('Delta') || c.includes('Gamma') ||
+            c.includes('Theta') || c.includes('Vega') || c.includes('Volume') || c.includes('OI') ||
+            c.includes('Days') || c.includes('Samples'))
+            return n.toLocaleString(undefined,{maximumFractionDigits:2});
+        return n.toLocaleString(undefined,{maximumFractionDigits:2});
+    }
+    """)
+    for col in display.columns:
+        if pd.api.types.is_numeric_dtype(display[col]):
+            gb.configure_column(col, valueFormatter=formatter)
+    options = gb.build()
+    kwargs = {
+        "gridOptions": options,
+        "update_mode": "NO_UPDATE",
+        "allow_unsafe_jscode": True,
+        "fit_columns_on_grid_load": fit_columns,
+        "theme": "streamlit",
+    }
+    if height is not None:
+        kwargs["height"] = height
+    if key:
+        kwargs["key"] = key
+    return AgGrid(display, **kwargs)
+
+
+def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None, get_all_contract_info_func=None, get_single_contract_details_func=None, get_option_chain_func=None, chart_type="Candlestick"):
     """Eclipse calendar, countdown, visibility feed, and NASA path map."""
     eclipse_df = get_eclipse_calendar_data()
     future_df = eclipse_df[eclipse_df["days_away"] >= 0].copy()
@@ -826,7 +1016,7 @@ def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None, g
     table_df = display_df[["date","kind","type","saros","visibility"]].copy()
     table_df["date"] = table_df["date"].dt.strftime("%Y-%m-%d")
     table_df.columns = ["Date","Body","Eclipse","Saros","Primary visibility"]
-    st.dataframe(table_df, use_container_width=True, hide_index=True)
+    render_aggrid(table_df, height=420, key="eclipse_calendar_grid")
     st.markdown("### Eclipse map")
     map_candidates = display_df[display_df["solar_path"]].copy()
     if map_candidates.empty: map_candidates = future_df[future_df["solar_path"]].copy()
@@ -862,7 +1052,7 @@ def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None, g
             display_eclipse_option_study(
                 ticker, option_eclipse_df,
                 get_all_contract_info_func, get_single_contract_details_func,
-                chart_type
+                get_option_chain_func, chart_type
             )
         else:
             st.warning("Options lookup functions are unavailable for the Eclipse Options Comparison.")
@@ -879,14 +1069,96 @@ def main_app():
     except (FileNotFoundError, KeyError):
         GOOGLE_API_KEY = ""
 
-    # MODIFIED: Polygon key now loaded securely from secrets
-    try:
-        POLYGON_API_KEY = "EQYXN1ceqg4zbMsRpnIyb4AmkgtNwbW0"
-        #POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
-    except (FileNotFoundError, KeyError):
-        st.error("Polygon API Key not found in secrets. Please add it to your secrets.toml file.")
-        st.stop()
+    # Public is now the primary market-data source. Keep the existing Polygon
+    # key as a fallback so a Public/API configuration problem never destroys
+    # the existing Alpha workflow. Public credentials belong in Streamlit Secrets.
+    #try:
+        #PUBLIC_API_SECRET = st.secrets["PUBLIC_API_SECRET"]
+    #except (FileNotFoundError, KeyError):
+    #    PUBLIC_API_SECRET = ""
 
+    try:
+        POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
+    except (FileNotFoundError, KeyError):
+        # Backward-compatible fallback for the current local build.
+        POLYGON_API_KEY = "EQYXN1ceqg4zbMsRpnIybN4AmkgtNwbW0"
+
+    PUBLIC_API_BASE = "https://api.public.com"
+
+    @st.cache_data(ttl=45 * 60, show_spinner=False)
+    def get_public_access_token(secret):
+        """Exchange the long-lived Public secret for a short-lived access token."""
+        if not secret:
+            return ""
+        response = requests.post(
+            f"{PUBLIC_API_BASE}/userapiauthservice/personal/access-tokens",
+            json={"validityInMinutes": 45, "secret": secret},
+            headers={"Content-Type": "application/json"},
+            timeout=20,
+        )
+        response.raise_for_status()
+        return response.json().get("accessToken", "")
+
+    @st.cache_data(ttl=10 * 60, show_spinner=False)
+    def get_public_account_id(secret):
+        """Resolve the user's Public account ID for market-data endpoints."""
+        token = get_public_access_token(secret)
+        if not token:
+            return ""
+        response = requests.get(
+            f"{PUBLIC_API_BASE}/userapigateway/trading/account",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            timeout=20,
+        )
+        response.raise_for_status()
+        accounts = response.json().get("accounts", [])
+        if not accounts:
+            return ""
+        return accounts[0].get("accountId", "")
+
+    def public_request(method, path, *, json_body=None, params=None):
+        """Small authenticated Public API wrapper used by Alpha's data layer."""
+        token = get_public_access_token(PUBLIC_API_SECRET)
+        if not token:
+            raise RuntimeError("PUBLIC_API_SECRET is not configured in Streamlit secrets.")
+
+        response = requests.request(
+            method,
+            f"{PUBLIC_API_BASE}{path}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=json_body,
+            params=params,
+            timeout=30,
+        )
+        response.raise_for_status()
+        return response.json()
+
+    # Official SDK client. The SDK handles access-token minting/refreshing and
+    # gives us typed option-chain objects, while the REST wrapper above remains
+    # available as a compatibility fallback.
+    public_sdk_client = None
+    if PUBLIC_SDK_AVAILABLE and PUBLIC_API_SECRET:
+        try:
+            public_account_id = get_public_account_id(PUBLIC_API_SECRET)
+            if public_account_id:
+                public_sdk_client = PublicApiClient(
+                    ApiKeyAuthConfig(
+                        api_secret_key=PUBLIC_API_SECRET,
+                        validity_minutes=45,
+                    ),
+                    config=PublicApiClientConfiguration(
+                        default_account_number=public_account_id
+                    ),
+                )
+        except Exception as sdk_init_error:
+            st.warning(f"Public Python SDK could not be initialized; using REST fallback. ({sdk_init_error})")
+            public_sdk_client = None
 
     # --- AI-Generated Background ---
     def set_background():
@@ -912,6 +1184,15 @@ def main_app():
     set_background()
 
     # --- Helper Functions ---
+
+    def exposure_millions(df, columns=("DEX", "GEX", "Call DEX", "Put DEX", "Net DEX", "Call GEX", "Put GEX", "Net GEX")):
+        """Return a display copy with exposure fields expressed in $ millions."""
+        result = df.copy()
+        for col in columns:
+            if col in result.columns:
+                result[col] = pd.to_numeric(result[col], errors="coerce") / 1_000_000.0
+        return result
+
 
     def display_event_countdown():
         """Calculates and displays the previous/next moon events and a countdown."""
@@ -973,45 +1254,94 @@ def main_app():
                 </div>
                 """, unsafe_allow_html=True)
 
+    def _public_period_for_range(start_date, end_date):
+        """Choose a Public historical-data period that covers the requested range."""
+        span_days = (pd.Timestamp(end_date).date() - pd.Timestamp(start_date).date()).days
+        if span_days <= 366:
+            return "YEAR"
+        if span_days <= 5 * 365:
+            return "FIVE_YEARS"
+        if span_days <= 10 * 365:
+            return "TEN_YEARS"
+        return "ALL"
+
+    def _public_bars_to_ohlcv(payload, start_date=None, end_date=None):
+        """Normalize Public bars v2 into Alpha's canonical OHLCV schema."""
+        bars = payload.get("regularMarket", {}).get("bars", [])
+        rows = []
+        for bar in bars:
+            rows.append({
+                "Date": pd.to_datetime(bar.get("timestamp"), utc=True, errors="coerce").tz_convert(None).normalize()
+                    if bar.get("timestamp") else pd.NaT,
+                "Open": bar.get("open"),
+                "High": bar.get("high"),
+                "Low": bar.get("low"),
+                "Close": bar.get("close"),
+                "Volume": bar.get("volume", 0),
+            })
+
+        df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        if df.empty:
+            return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume", "Adj Close"])
+
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        df = (
+            df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+              .sort_values("Date")
+              .drop_duplicates("Date", keep="last")
+              .reset_index(drop=True)
+        )
+
+        if start_date is not None:
+            df = df[df["Date"] >= pd.Timestamp(start_date).normalize()]
+        if end_date is not None:
+            df = df[df["Date"] <= pd.Timestamp(end_date).normalize()]
+
+        df["Adj Close"] = df["Close"].astype(float)
+        return df.reset_index(drop=True)
+
     def get_price_data(ticker, start_date, end_date):
-        """Fetch one canonical OHLC DataFrame for both charting and lunar analysis."""
+        """Fetch one canonical OHLCV DataFrame for both charting and lunar analysis.
+
+        Public is primary; Polygon remains an automatic fallback. Downstream Alpha
+        code receives exactly the same normalized columns either way.
+        """
+        ticker = str(ticker).upper().strip()
+
+        if PUBLIC_API_SECRET:
+            try:
+                period = _public_period_for_range(start_date, end_date)
+                payload = public_request(
+                    "GET",
+                    f"/userapigateway/historicdata/EQUITY/{ticker}/{period}",
+                    params={"tradingSessionToggle": "REGULAR_HOURS"},
+                )
+                df = _public_bars_to_ohlcv(payload, start_date, end_date)
+                if not df.empty:
+                    return df
+            except Exception as public_error:
+                st.warning(f"Public market data unavailable for {ticker}; using Polygon fallback. ({public_error})")
+
+        # Existing Polygon implementation retained as a safety net.
         try:
             client = RESTClient(POLYGON_API_KEY)
             aggs = client.get_aggs(
-                ticker=str(ticker).upper().strip(),
-                multiplier=1,
-                timespan="day",
-                from_=start_date,
-                to=end_date,
-                adjusted=True,
-                sort="asc",
-                limit=50000,
+                ticker=ticker, multiplier=1, timespan="day", from_=start_date, to=end_date,
+                adjusted=True, sort="asc", limit=50000,
             )
             df = pd.DataFrame(aggs)
             if df.empty:
                 return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Adj Close", "Volume"])
-
-            df = df.rename(columns={
-                "open": "Open",
-                "high": "High",
-                "low": "Low",
-                "close": "Close",
-                "volume": "Volume",
-            })
+            df = df.rename(columns={"open":"Open","high":"High","low":"Low","close":"Close","volume":"Volume"})
             df["Date"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True).dt.tz_convert(None).dt.normalize()
             for col in ["Open", "High", "Low", "Close", "Volume"]:
                 if col in df.columns:
                     df[col] = pd.to_numeric(df[col], errors="coerce")
-
-            df = (
-                df[["Date", "Open", "High", "Low", "Close", "Volume"]]
-                .dropna(subset=["Date", "Open", "High", "Low", "Close"])
-                .sort_values("Date")
-                .drop_duplicates(subset=["Date"], keep="last")
-                .reset_index(drop=True)
-            )
-            # Preserve the old app's expected column while making it impossible
-            # for Line and Candlestick to use different underlying prices.
+            df = (df[["Date","Open","High","Low","Close","Volume"]]
+                    .dropna(subset=["Date","Open","High","Low","Close"])
+                    .sort_values("Date").drop_duplicates("Date", keep="last").reset_index(drop=True))
             df["Adj Close"] = df["Close"].astype(float)
             return df
         except Exception as e:
@@ -1025,120 +1355,436 @@ def main_app():
             fig.add_shape(type='line', x0=date, x1=date, y0=0, y1=1, yref='paper', line=dict(color=color, dash=dash_style, width=1))
         return fig
 
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=600, show_spinner=False)
+    def get_public_option_expirations(ticker):
+        """Return Public option expirations using the official SDK first."""
+        ticker = str(ticker).upper().strip()
+        if public_sdk_client is not None:
+            response = public_sdk_client.get_option_expirations(
+                OptionExpirationsRequest(
+                    instrument=OrderInstrument(symbol=ticker, type=InstrumentType.EQUITY)
+                )
+            )
+            return sorted(list(response.expirations))
+
+        account_id = get_public_account_id(PUBLIC_API_SECRET)
+        if not account_id:
+            return []
+        payload = public_request(
+            "POST",
+            f"/userapigateway/marketdata/{account_id}/option-expirations",
+            json_body={"instrument": {"symbol": ticker, "type": "EQUITY"}},
+        )
+        return sorted(payload.get("expirations", []))
+
+    @st.cache_data(ttl=120, show_spinner=False)
+    def get_public_option_chain(ticker, expiration):
+        """Return a normalized dict-shaped option chain from Public SDK/REST."""
+        ticker = str(ticker).upper().strip()
+        expiration = str(expiration)
+
+        if public_sdk_client is not None:
+            response = public_sdk_client.get_option_chain(
+                OptionChainRequest(
+                    instrument=OrderInstrument(symbol=ticker, type=InstrumentType.EQUITY),
+                    expiration_date=expiration,
+                )
+            )
+
+            def sdk_contract_to_dict(contract):
+                details = getattr(contract, "option_details", None)
+                greeks = getattr(details, "greeks", None) if details else None
+                instrument = getattr(contract, "instrument", None)
+                return {
+                    "instrument": {"symbol": getattr(instrument, "symbol", None)},
+                    "last": getattr(contract, "last", None),
+                    "bid": getattr(contract, "bid", None),
+                    "ask": getattr(contract, "ask", None),
+                    "volume": getattr(contract, "volume", 0),
+                    "openInterest": getattr(contract, "open_interest", getattr(contract, "openInterest", 0)),
+                    "optionDetails": {
+                        "strikePrice": getattr(details, "strike_price", None) if details else None,
+                        "midPrice": getattr(details, "mid_price", None) if details else None,
+                        "greeks": {
+                            "delta": getattr(greeks, "delta", None) if greeks else None,
+                            "gamma": getattr(greeks, "gamma", None) if greeks else None,
+                            "theta": getattr(greeks, "theta", None) if greeks else None,
+                            "vega": getattr(greeks, "vega", None) if greeks else None,
+                            "rho": getattr(greeks, "rho", None) if greeks else None,
+                            "impliedVolatility": getattr(greeks, "implied_volatility", None) if greeks else None,
+                        },
+                    },
+                }
+
+            return {
+                "baseSymbol": getattr(response, "base_symbol", ticker),
+                "calls": [sdk_contract_to_dict(c) for c in response.calls],
+                "puts": [sdk_contract_to_dict(p) for p in response.puts],
+            }
+
+        account_id = get_public_account_id(PUBLIC_API_SECRET)
+        if not account_id:
+            return {"baseSymbol": ticker, "calls": [], "puts": []}
+        return public_request(
+            "POST",
+            f"/userapigateway/marketdata/{account_id}/option-chain",
+            json_body={
+                "instrument": {"symbol": ticker, "type": "EQUITY"},
+                "expirationDate": expiration,
+            },
+        )
+
+    def _chain_contract_rows(chain):
+        """Normalize Public SDK/REST option chains across field-shape variants."""
+        rows = []
+
+        def dig(obj, *paths):
+            for path in paths:
+                cur = obj
+                ok = True
+                for key in path:
+                    if isinstance(cur, dict):
+                        cur = cur.get(key)
+                    else:
+                        cur = getattr(cur, key, None)
+                    if cur is None:
+                        ok = False
+                        break
+                if ok and cur not in (None, ""):
+                    return cur
+            return None
+
+        def number(value):
+            if isinstance(value, dict):
+                value = value.get("value", value.get("raw", value.get("amount")))
+            try:
+                return float(value) if value not in (None, "") else None
+            except (TypeError, ValueError):
+                return None
+
+        def integer(value):
+            try:
+                return int(float(value or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        for option_type, contracts in (("call", chain.get("calls", [])), ("put", chain.get("puts", []))):
+            for item in contracts:
+                details = dig(item, ("optionDetails",), ("option_details",)) or {}
+                greeks = (
+                    dig(details, ("greeks",), ("Greeks",))
+                    or dig(item, ("greeks",), ("Greeks",))
+                    or {}
+                )
+
+                strike = dig(
+                    details, ("strikePrice",), ("strike_price",), ("strike",)
+                )
+                if strike is None:
+                    strike = dig(
+                        item, ("strikePrice",), ("strike_price",), ("strike",)
+                    )
+
+                oi = dig(
+                    item,
+                    ("openInterest",), ("open_interest",),
+                    ("openInterestQuantity",),
+                )
+                if oi is None:
+                    oi = dig(details, ("openInterest",), ("open_interest",))
+
+                rows.append({
+                    "type": option_type,
+                    "symbol": dig(item, ("instrument", "symbol"), ("symbol",)),
+                    "strike": number(strike),
+                    "last": number(dig(item, ("last",), ("lastPrice",), ("last_price",), ("close",))),
+                    "bid": number(dig(item, ("bid",), ("bidPrice",), ("bid_price",))),
+                    "ask": number(dig(item, ("ask",), ("askPrice",), ("ask_price",))),
+                    "volume": integer(dig(item, ("volume",), ("tradingVolume",), ("trading_volume",))),
+                    "openInterest": integer(oi),
+                    "midPrice": number(dig(details, ("midPrice",), ("mid_price",))),
+                    "delta": number(dig(greeks, ("delta",), ("Delta",))),
+                    "gamma": number(dig(greeks, ("gamma",), ("Gamma",))),
+                    "theta": number(dig(greeks, ("theta",), ("Theta",))),
+                    "vega": number(dig(greeks, ("vega",), ("Vega",))),
+                    "rho": number(dig(greeks, ("rho",), ("Rho",))),
+                    "iv": number(dig(
+                        greeks,
+                        ("impliedVolatility",), ("implied_volatility",), ("iv",)
+                    )),
+                })
+        return rows
+
+
+    @st.cache_data(ttl=600, show_spinner=False)
     def get_all_contract_info_free(ticker):
+        """Return option expirations from Public.com only.
+
+        The existing UI expects (expirations, strikes-by-expiration), so we preserve
+        that shape. Public supplies the expirations first and the complete chain is
+        loaded lazily after the user selects an expiration. Polygon is intentionally
+        NOT used for option discovery.
+        """
+        if not PUBLIC_API_SECRET:
+            st.error("Public API secret is not configured. Options lookup requires Public.com.")
+            return [], {}
+
         try:
-            client = RESTClient(POLYGON_API_KEY)
-            contracts = client.list_options_contracts(underlying_ticker=ticker, limit=1000)
-            expirations_with_strikes = defaultdict(set)
-            for c in contracts:
-                expirations_with_strikes[c.expiration_date].add(c.strike_price)
-            sorted_expirations = sorted(expirations_with_strikes.keys())
-            final_data = {exp: sorted(list(strikes)) for exp, strikes in expirations_with_strikes.items()}
-            return sorted_expirations, final_data
-        except Exception as e:
-            st.error(f"Could not fetch contract info: {e}")
+            return get_public_option_expirations(ticker), {}
+        except Exception as public_error:
+            st.error(f"Public option expiration lookup failed: {public_error}")
             return [], {}
 
     def get_single_contract_details_free(ticker, expiration, strike, type, history_start=None, history_end=None):
-        try:
-            client = RESTClient(POLYGON_API_KEY)
-            contract_list = list(client.list_options_contracts(
-                underlying_ticker=ticker, expiration_date=expiration, strike_price=strike,
-                contract_type=type, limit=1
-            ))
-            if not contract_list:
-                st.warning("Contract not found.")
-                return None, None
-            
-            option_ticker = contract_list[0].ticker
-            
-            yesterday = dt.date.today() - dt.timedelta(days=1)
-            history_start = history_start or (yesterday - dt.timedelta(days=365))
-            history_end = history_end or yesterday
-            history_aggs = client.get_aggs(
-                option_ticker,
-                1,
-                "day",
-                pd.Timestamp(history_start).strftime('%Y-%m-%d'),
-                pd.Timestamp(history_end).strftime('%Y-%m-%d'),
-                limit=5000
-            )
+        """Fetch an option contract and its option history from Public.com only.
 
-            # Normalize Polygon option aggregates into the same clean OHLC
-            # structure used by the main stock-price chart.
-            df = pd.DataFrame(history_aggs)
+        Polygon remains available for stock/price-data fallback elsewhere in the app,
+        but it is deliberately not used for option lookup or option contract history.
+        """
+        ticker = str(ticker).upper().strip()
+        option_type = str(type).lower()
 
-            if not df.empty:
-                df = df.rename(columns={
-                    'open': 'Open',
-                    'high': 'High',
-                    'low': 'Low',
-                    'close': 'Close',
-                    'volume': 'Volume'
-                })
-
-                df['Date'] = (
-                    pd.to_datetime(
-                        df['timestamp'],
-                        unit='ms',
-                        utc=True
-                    )
-                    .dt.tz_convert(None)
-                    .dt.normalize()
-                )
-
-                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
-                    if col in df.columns:
-                        df[col] = pd.to_numeric(
-                            df[col],
-                            errors='coerce'
-                        )
-
-                df = (
-                    df[
-                        [
-                            'Date',
-                            'Open',
-                            'High',
-                            'Low',
-                            'Close',
-                            'Volume'
-                        ]
-                    ]
-                    .dropna(
-                        subset=[
-                            'Date',
-                            'Open',
-                            'High',
-                            'Low',
-                            'Close'
-                        ]
-                    )
-                    .sort_values('Date')
-                    .drop_duplicates(
-                        subset=['Date'],
-                        keep='last'
-                    )
-                    .reset_index(drop=True)
-                )
-
-            last_day_details = None
-            try:
-                    last_day_details = client.get_daily_open_close_agg(option_ticker, yesterday.strftime('%Y-%m-%d'))
-            except: 
-                    pass
-
-            details = {
-                "symbol": option_ticker, "open": getattr(last_day_details, 'open', 'N/A'),
-                "close": getattr(last_day_details, 'close', 'N/A'), "high": getattr(last_day_details, 'high', 'N/A'),
-                "low": getattr(last_day_details, 'low', 'N/A'), "volume": getattr(last_day_details, 'volume', 'N/A')
-            }
-            return details, df
-            
-        except Exception as e:
-            st.error(f"Could not fetch contract details: {e}")
+        if not PUBLIC_API_SECRET:
+            st.error("Public API secret is not configured. Options lookup requires Public.com.")
             return None, None
+
+        try:
+            chain = get_public_option_chain(ticker, expiration)
+            rows = _chain_contract_rows(chain)
+            matches = [r for r in rows if r["type"] == option_type and r["strike"] is not None and abs(r["strike"] - float(strike)) < 1e-9]
+            if not matches:
+                st.warning("Contract not found in Public option chain.")
+                return None, None
+
+            selected = matches[0]
+            option_ticker = selected["symbol"]
+            today = dt.date.today()
+            history_start = history_start or (today - dt.timedelta(days=365))
+            # Public historical option bars are requested through today.  The
+            # endpoint may not have a completed bar yet during the live session,
+            # so the current chain snapshot below remains the source of truth for
+            # Last/Bid/Ask/Volume/Open Interest/Greeks.
+            history_end = history_end or today
+
+            period = _public_period_for_range(history_start, history_end)
+            payload = public_request(
+                "GET",
+                f"/userapigateway/historicdata/OPTION/{option_ticker}/{period}",
+            )
+            history_df = _public_bars_to_ohlcv(payload, history_start, history_end)
+
+            last_day = history_df.iloc[-1] if not history_df.empty else None
+            details = {
+                "symbol": option_ticker,
+                "open": float(last_day["Open"]) if last_day is not None else selected.get("last"),
+                "close": float(last_day["Close"]) if last_day is not None else selected.get("last"),
+                "high": float(last_day["High"]) if last_day is not None else None,
+                "low": float(last_day["Low"]) if last_day is not None else None,
+                "volume": selected.get("volume", int(last_day["Volume"]) if last_day is not None else 0),
+                "open_interest": selected.get("openInterest", 0),
+                "last": selected.get("last"),
+                "bid": selected.get("bid"),
+                "ask": selected.get("ask"),
+                "delta": selected.get("delta"),
+                "gamma": selected.get("gamma"),
+                "theta": selected.get("theta"),
+                "vega": selected.get("vega"),
+                "rho": selected.get("rho"),
+                "iv": selected.get("iv"),
+            }
+            return details, history_df
+        except Exception as public_error:
+            st.error(f"Public option data lookup failed: {public_error}")
+            return None, None
+
+
+    def calculate_option_exposure(df_chain, spot_price, contract_multiplier=100):
+        """Calculate modeled dealer-style DEX/GEX exposure by strike.
+
+        Public's option chain already provides delta/gamma, so no per-contract
+        Greeks API calls are required. This is a modeled exposure convention,
+        not a literal observation of dealer positions.
+        """
+        required = ["strike", "type", "openInterest", "delta", "gamma"]
+        if df_chain is None or df_chain.empty:
+            return pd.DataFrame(), None
+
+        df = df_chain.copy()
+        # Accept both Public's camelCase and common snake_case field names.
+        aliases = {
+            "open_interest": "openInterest",
+            "option_type": "type",
+            "strike_price": "strike",
+        }
+        for src, dst in aliases.items():
+            if dst not in df.columns and src in df.columns:
+                df[dst] = df[src]
+        missing = [c for c in required if c not in df.columns]
+        if missing:
+            return pd.DataFrame(), None
+
+        for col in ["strike", "openInterest", "delta", "gamma"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        df["type"] = df["type"].astype(str).str.lower().str.strip()
+        df = df[df["strike"] > 0].copy()
+        if df.empty:
+            return pd.DataFrame(), None
+
+        spot = float(spot_price)
+        df["DEX"] = df["delta"] * df["openInterest"] * contract_multiplier * spot
+        df["GEX"] = df["gamma"] * df["openInterest"] * contract_multiplier * (spot ** 2) * 0.01
+        # Modeled put gamma exposure is shown as negative, per the app's
+        # requested dealer-exposure convention.
+        df.loc[df["type"].isin(["put", "p"]), "GEX"] *= -1
+
+        df["Call OI"] = df["openInterest"].where(df["type"].isin(["call", "c"]), 0)
+        df["Put OI"] = df["openInterest"].where(df["type"].isin(["put", "p"]), 0)
+        df["Call DEX"] = df["DEX"].where(df["type"].isin(["call", "c"]), 0)
+        df["Put DEX"] = df["DEX"].where(df["type"].isin(["put", "p"]), 0)
+        df["Call GEX"] = df["GEX"].where(df["type"].isin(["call", "c"]), 0)
+        df["Put GEX"] = df["GEX"].where(df["type"].isin(["put", "p"]), 0)
+
+        exposure = df.groupby("strike", as_index=False).agg({
+            "Call OI": "sum", "Put OI": "sum",
+            "Call DEX": "sum", "Put DEX": "sum",
+            "Call GEX": "sum", "Put GEX": "sum",
+        }).rename(columns={"strike": "Strike"})
+        exposure["Total OI"] = exposure["Call OI"] + exposure["Put OI"]
+        exposure["Net DEX"] = exposure["Call DEX"] + exposure["Put DEX"]
+        exposure["Net GEX"] = exposure["Call GEX"] + exposure["Put GEX"]
+        exposure = exposure.sort_values("Strike").reset_index(drop=True)
+
+        gamma_flip = None
+        if len(exposure) >= 2:
+            x = exposure["Strike"].to_numpy(dtype=float)
+            y = exposure["Net GEX"].to_numpy(dtype=float)
+            for i in range(len(y) - 1):
+                if y[i] == 0:
+                    gamma_flip = x[i]
+                    break
+                if y[i] * y[i + 1] < 0:
+                    # Linear interpolation between the two strikes where net GEX
+                    # changes sign.
+                    gamma_flip = x[i] + (0 - y[i]) * (x[i + 1] - x[i]) / (y[i + 1] - y[i])
+                    break
+            if gamma_flip is None and y[-1] == 0:
+                gamma_flip = x[-1]
+
+        return exposure, gamma_flip
+
+    @st.cache_data(ttl=300, show_spinner=False)
+    def get_expiration_term_structure(ticker, expirations, spot_price):
+        """Build current-session positioning for the FULL Public chain at every expiration.
+
+        This intentionally does not use the selected strike-range filter from the
+        single-expiration Options Lookup. Each expiration is fetched and calculated
+        independently from its complete Public option chain.
+
+        Historical 1D GEX/DEX changes are intentionally omitted until corresponding
+        prior-day chain/snapshot data is available. No session cache is treated as a
+        legitimate 1D change.
+        """
+        today = dt.date.today()
+        rows = []
+        chain_cache = {}
+        for expiration in expirations:
+            try:
+                exp_date = pd.Timestamp(expiration).date()
+            except Exception:
+                continue
+            if exp_date < today:
+                continue
+
+            try:
+                chain = get_public_option_chain(ticker, str(expiration))
+                chain_rows = _chain_contract_rows(chain)
+                full_df = pd.DataFrame(chain_rows)
+                chain_cache[str(expiration)] = full_df
+                if full_df.empty:
+                    continue
+
+                exposure_df, _ = calculate_option_exposure(full_df, spot_price)
+                if exposure_df.empty:
+                    continue
+
+                gex = float(exposure_df["Net GEX"].sum())
+                dex = float(exposure_df["Net DEX"].sum())
+                oi = float(exposure_df["Total OI"].sum())
+
+                calls = full_df[full_df["type"].astype(str).str.lower().isin(["call", "c"])].copy()
+                puts = full_df[full_df["type"].astype(str).str.lower().isin(["put", "p"])].copy()
+                calls["gamma"] = pd.to_numeric(calls.get("gamma", 0), errors="coerce").fillna(0.0)
+                puts["gamma"] = pd.to_numeric(puts.get("gamma", 0), errors="coerce").fillna(0.0)
+                calls["openInterest"] = pd.to_numeric(calls.get("openInterest", 0), errors="coerce").fillna(0.0)
+                puts["openInterest"] = pd.to_numeric(puts.get("openInterest", 0), errors="coerce").fillna(0.0)
+                calls["volume"] = pd.to_numeric(calls.get("volume", 0), errors="coerce").fillna(0.0)
+                puts["volume"] = pd.to_numeric(puts.get("volume", 0), errors="coerce").fillna(0.0)
+
+                # Side-specific exposure identifies the strongest modeled resistance/support.
+                calls["call_gex"] = calls["gamma"] * calls["openInterest"] * 100 * float(spot_price) ** 2 * 0.01
+                puts["put_gex"] = -puts["gamma"] * puts["openInterest"] * 100 * float(spot_price) ** 2 * 0.01
+                call_level = float(calls.loc[calls["call_gex"].idxmax(), "strike"]) if not calls.empty and calls["call_gex"].max() > 0 else None
+                put_level = float(puts.loc[puts["put_gex"].idxmin(), "strike"]) if not puts.empty and puts["put_gex"].min() < 0 else None
+
+                # Highest combined volume concentration.
+                vol_by_strike = full_df.groupby("strike", as_index=False)["volume"].sum()
+                vol_by_strike["volume"] = pd.to_numeric(vol_by_strike["volume"], errors="coerce").fillna(0.0)
+                high_vol_level = float(vol_by_strike.loc[vol_by_strike["volume"].idxmax(), "strike"]) if not vol_by_strike.empty and vol_by_strike["volume"].max() > 0 else None
+
+                # Expected move: ATM call + put mid/last through this expiration.
+                work = full_df.copy()
+                work["strike"] = pd.to_numeric(work["strike"], errors="coerce")
+                work["bid"] = pd.to_numeric(work["bid"], errors="coerce")
+                work["ask"] = pd.to_numeric(work["ask"], errors="coerce")
+                work["last"] = pd.to_numeric(work["last"], errors="coerce")
+                work["mid"] = ((work["bid"] + work["ask"]) / 2).where(
+                    work["bid"].notna() & work["ask"].notna() & (work["ask"] > 0), work["last"]
+                )
+                work["distance"] = (work["strike"] - float(spot_price)).abs()
+                atm_strike = work.sort_values("distance")["strike"].iloc[0] if not work.empty else None
+                expected_move = None
+                expected_low = None
+                expected_high = None
+                if atm_strike is not None:
+                    atm = work[work["strike"] == atm_strike]
+                    call_mid = pd.to_numeric(atm.loc[atm["type"].isin(["call", "c"]), "mid"], errors="coerce").dropna()
+                    put_mid = pd.to_numeric(atm.loc[atm["type"].isin(["put", "p"]), "mid"], errors="coerce").dropna()
+                    if not call_mid.empty and not put_mid.empty:
+                        expected_move = float(call_mid.iloc[0] + put_mid.iloc[0])
+                        expected_low = max(0.0, float(spot_price) - expected_move)
+                        expected_high = float(spot_price) + expected_move
+
+                dte = max(0, (exp_date - today).days)
+                rows.append({
+                    "Expiration Date": exp_date,
+                    "DTE": dte,
+                    "GEX": gex,
+                    "DEX": dex,
+                    "OI": oi,
+                    "Call Resistance": call_level,
+                    "Put Support": put_level,
+                    "High Vol. Level": high_vol_level,
+                    "Expiry Expected Move": expected_move,
+                    "Expected Low": expected_low,
+                    "Expected High": expected_high,
+                })
+            except Exception:
+                # One bad expiration should not prevent the rest of the term structure.
+                continue
+
+        result = pd.DataFrame(rows).sort_values(["Expiration Date", "DTE"]).reset_index(drop=True) if rows else pd.DataFrame()
+        if not result.empty:
+            total_gex = float(result["GEX"].sum())
+            total_dex = float(result["DEX"].sum())
+            total_oi = float(result["OI"].sum())
+            result["GEX Normalized"] = result["GEX"].apply(lambda x: (x / total_gex * 100) if total_gex else 0.0)
+            result["DEX Normalized"] = result["DEX"].apply(lambda x: (x / total_dex * 100) if total_dex else 0.0)
+            result["OI Normalized"] = result["OI"].apply(lambda x: (x / total_oi * 100) if total_oi else 0.0)
+            # Explicit placeholders: legitimate 1D changes require historical/snapshot data.
+            result["GEX Change 1D"] = None
+            result["DEX Change 1D"] = None
+        return result, chain_cache
+
 
     def load_data(ticker, start_date, end_date):
         with st.spinner("Fetching stock data..."):
@@ -1412,7 +2058,7 @@ def main_app():
             room_label = "Room to Average" if room_to_avg >= 0 else "Beyond Average"
             st.markdown(f"**{room_label}** <br> {color_style(room_to_avg, is_dollar=True)}", unsafe_allow_html=True)
 
-    def display_analysis_table(results_list):
+    def display_analysis_table(results_list, grid_key="lunar_cycle_analysis_grid"):
         if not results_list: return
         st.subheader("Lunar Cycle Analysis Results")
         df = pd.DataFrame(results_list)
@@ -1427,22 +2073,27 @@ def main_app():
 
         display_df.rename(columns={
             'start_date': 'Start Date', 'end_date': 'End Date', 'entry_price': 'Entry Price',
-            'end_price': 'End Price', 'pl_delta': 'P/L ($)', 'pl_pct': 'P/L (%)',
+            'end_price': 'End Price', 'pl_delta': 'P/L ($)', 'pl_pct': 'Delta %',
             'max_profit': 'Max Profit', 'max_drawdown': 'Max Drawdown', 'status': 'Status'
         }, inplace=True)
 
+        # Display dates explicitly as US month/day/year. The source values remain
+        # true datetimes for all calculations; only the table presentation changes.
+        display_df["Start Date"] = display_df["Start Date"].dt.strftime("%m/%d/%Y")
+        display_df["End Date"] = display_df["End Date"].dt.strftime("%m/%d/%Y")
+
         def style_rows(row):
             color = 'background-color: rgba(0, 128, 0, 0.2)' if row['P/L ($)'] > 0 else 'background-color: rgba(128, 0, 0, 0.2)'
-            return [color if col in ['P/L ($)', 'P/L (%)', 'Status'] else '' for col in display_df.columns]
+            return [color if col in ['P/L ($)', 'Delta %', 'Status'] else '' for col in display_df.columns]
 
         styled_df = display_df.style.apply(style_rows, axis=1).format({
-            "Start Date": '{:%Y-%m-%d}', "End Date": '{:%Y-%m-%d}',
+            "Start Date": '{:%m/%d/%Y}', "End Date": '{:%m/%d/%Y}',
             "Entry Price": "${:,.2f}", "End Price": "${:,.2f}",
-            "P/L ($)": "${:+.2f}", "P/L (%)": "{:+.2f}%",
+            "P/L ($)": "${:+.2f}", "Delta %": "{:+.2f}%",
             "Max Profit": "${:,.2f}", "Max Drawdown": "${:,.2f}"
         })
         
-        st.dataframe(styled_df, use_container_width=True)
+        render_aggrid(display_df, height=400, key=grid_key)
 
 
     # --- TradingView Top Ticker Tape ---
@@ -1974,13 +2625,13 @@ def main_app():
             st.info("Enter a stock ticker and click 'Update Chart' in the sidebar to begin.")
 
         if show_analysis and stock_analysis_results:
-            display_analysis_table(stock_analysis_results)
+            display_analysis_table(stock_analysis_results, grid_key="lunar_cycle_analysis_grid_stock")
             display_summary_and_active_cycle_stats(stock_analysis_results)
 
         st.markdown("---")
 
         st.markdown(f"<div class='panel-label'>Options research · {st.session_state.get('ticker', 'N/A')}</div>", unsafe_allow_html=True)
-        st.caption("Polygon free-plan data · Load the chain only when needed to conserve API calls.")
+        st.caption("Options data is loaded from Public.com via the official Python SDK (with Public REST compatibility fallback). Polygon is not used for option lookup.")
         
         if 'options_loaded' not in st.session_state:
             st.session_state.options_loaded = False
@@ -1991,78 +2642,396 @@ def main_app():
                 st.experimental_rerun()
 
         if st.session_state.options_loaded:
-            sorted_expirations, contract_data = get_all_contract_info_free(st.session_state.get('ticker', 'N/A'))
+            with st.spinner("Loading option expirations..."):
+                sorted_expirations, contract_data = get_all_contract_info_free(st.session_state.get('ticker', 'N/A'))
             
             if not sorted_expirations:
                 st.warning(f"Could not find any option expiration dates for {st.session_state.get('ticker', 'N/A')}.")
             else:
-                col1, col2, col3 = st.columns(3)
-                with col1:
-                    exp_date_str = st.selectbox("Select Expiration Date", options=sorted_expirations)
-                strikes = contract_data.get(exp_date_str, [])
-                if not strikes:
-                    st.warning("No strikes found for this expiration.")
+                exp_date_str = st.selectbox("Select Expiration Date", options=sorted_expirations, key="chain_exp_select")
+                
+                with st.spinner(f"Loading full option chain for {exp_date_str}..."):
+                    try:
+                        selected_chain = get_public_option_chain(st.session_state.get('ticker', 'N/A'), exp_date_str)
+                        chain_rows = _chain_contract_rows(selected_chain)
+                    except Exception as chain_error:
+                        st.error(f"Could not load Public option chain: {chain_error}")
+                        chain_rows = []
+
+                if not chain_rows:
+                    st.warning("No option chain data available for this expiration.")
                 else:
-                    with col2:
-                        strike_price = st.selectbox("Select Strike Price", options=strikes)
-                    with col3:
-                        option_type = st.radio("Select Option Type", ["call", "put"], horizontal=True)
+                    df_chain = pd.DataFrame(chain_rows)
                     
-                    if st.button("Fetch Contract Details"):
-                        with st.spinner(f"Fetching {option_type.upper()} @ ${strike_price} expiring {exp_date_str}..."):
-                            details, history_df = get_single_contract_details_free(st.session_state.get('ticker'), exp_date_str, strike_price, option_type)
+                    type_col = next((col for col in ['option_type', 'type', 'contract_type'] if col in df_chain.columns), None)
+                    strike_col = next((col for col in ['strike', 'strike_price'] if col in df_chain.columns), 'strike')
+                    
+                    if strike_col != 'strike' and strike_col in df_chain.columns:
+                        df_chain['strike'] = df_chain[strike_col]
+
+                    all_strikes = sorted(df_chain['strike'].unique()) if 'strike' in df_chain.columns else []
+                    
+                    if all_strikes:
+                        default_min = float(all_strikes[0])
+                        default_max = float(all_strikes[-1])
+                        
+                        st.markdown("**Strike Range Filter**")
+                        rc1, rc2 = st.columns(2)
+                        with rc1:
+                            user_min_strike = st.number_input("Min Strike", value=default_min, step=1.0, key="chain_min_strike")
+                        with rc2:
+                            user_max_strike = st.number_input("Max Strike", value=default_max, step=1.0, key="chain_max_strike")
+                        
+                        strikes = [s for s in all_strikes if user_min_strike <= s <= user_max_strike]
+                        if not strikes:
+                            st.warning("No strikes found within your custom range. Resetting to full range.")
+                            strikes = all_strikes
+                    else:
+                        strikes = []
+
+                    # 1. Option Chain Matrix Table Data
+                    chain_table_data = []
+                    for s in strikes:
+                        if type_col:
+                            c_row = df_chain[(df_chain['strike'] == s) & (df_chain[type_col].astype(str).str.lower().isin(['call', 'c']))]
+                            p_row = df_chain[(df_chain['strike'] == s) & (df_chain[type_col].astype(str).str.lower().isin(['put', 'p']))]
+                        else:
+                            c_row = pd.DataFrame()
+                            p_row = pd.DataFrame()
+                        
+                        row_data = {}
+                        row_data['Call Vol'] = int(c_row.iloc[0].get('volume', 0)) if not c_row.empty and pd.notna(c_row.iloc[0].get('volume')) else 0
+                        row_data['Call Last'] = float(c_row.iloc[0].get('last', c_row.iloc[0].get('close', 0.0))) if not c_row.empty and pd.notna(c_row.iloc[0].get('last', c_row.iloc[0].get('close', 0.0))) else 0.0
+                        row_data['Call Bid'] = float(c_row.iloc[0].get('bid', 0.0)) if not c_row.empty and pd.notna(c_row.iloc[0].get('bid')) else 0.0
+                        row_data['Call Ask'] = float(c_row.iloc[0].get('ask', 0.0)) if not c_row.empty and pd.notna(c_row.iloc[0].get('ask')) else 0.0
+                        
+                        row_data['Strike'] = s
+                        
+                        row_data['Put Bid'] = float(p_row.iloc[0].get('bid', 0.0)) if not p_row.empty and pd.notna(p_row.iloc[0].get('bid')) else 0.0
+                        row_data['Put Ask'] = float(p_row.iloc[0].get('ask', 0.0)) if not p_row.empty and pd.notna(p_row.iloc[0].get('ask')) else 0.0
+                        row_data['Put Last'] = float(p_row.iloc[0].get('last', p_row.iloc[0].get('close', 0.0))) if not p_row.empty and pd.notna(p_row.iloc[0].get('last', p_row.iloc[0].get('close', 0.0))) else 0.0
+                        row_data['Put Vol'] = int(p_row.iloc[0].get('volume', 0)) if not p_row.empty and pd.notna(p_row.iloc[0].get('volume')) else 0
+                        
+                        chain_table_data.append(row_data)
+                    
+                    chain_df = pd.DataFrame(chain_table_data)
+                    
+                    st.subheader(f"Option Chain Matrix — {exp_date_str}")
+                    
+                    def style_chain(df):
+                        styles = pd.DataFrame('', index=df.index, columns=df.columns)
+                        for col in df.columns:
+                            if 'Call' in col:
+                                styles[col] = 'color: #2ecc71;'
+                            elif 'Put' in col:
+                                styles[col] = 'color: #e74c3c;'
+                            elif col == 'Strike':
+                                styles[col] = 'font-weight: bold; color: #f1c40f; text-align: center;'
+                        return styles
+
+                    styled_chain_df = chain_df.style.apply(style_chain, axis=None).format({
+                        'Call Last': '${:.2f}', 'Call Bid': '${:.2f}', 'Call Ask': '${:.2f}',
+                        'Put Last': '${:.2f}', 'Put Bid': '${:.2f}', 'Put Ask': '${:.2f}',
+                        'Strike': '{:.2f}'
+                    }).bar(subset=['Call Vol'], color='#1b4d3e', vmin=0).bar(subset=['Put Vol'], color='#5c2121', vmin=0)
+
+                    # Removed fixed height so it displays fully on the page
+                    render_aggrid(chain_df, height=620, key="option_chain_matrix_grid")
+
+                    # 2. Strike-Level Exposure & Net Flow Analysis Matrix
+                    st.markdown("---")
+                    st.subheader(f"Strike-Level Exposure & Volume Analysis — {exp_date_str}")
+                    
+                    strike_analysis_data = []
+                    for s in strikes:
+                        if type_col:
+                            c_row = df_chain[(df_chain['strike'] == s) & (df_chain[type_col].astype(str).str.lower().isin(['call', 'c']))]
+                            p_row = df_chain[(df_chain['strike'] == s) & (df_chain[type_col].astype(str).str.lower().isin(['put', 'p']))]
+                        else:
+                            c_row = pd.DataFrame()
+                            p_row = pd.DataFrame()
+                            
+                        c_vol = int(c_row.iloc[0].get('volume', 0)) if not c_row.empty and pd.notna(c_row.iloc[0].get('volume')) else 0
+                        p_vol = int(p_row.iloc[0].get('volume', 0)) if not p_row.empty and pd.notna(p_row.iloc[0].get('volume')) else 0
+                        
+                        c_oi = int(c_row.iloc[0].get('open_interest', c_row.iloc[0].get('openInterest', 0))) if not c_row.empty and pd.notna(c_row.iloc[0].get('open_interest', c_row.iloc[0].get('openInterest', 0))) else 0
+                        p_oi = int(p_row.iloc[0].get('open_interest', p_row.iloc[0].get('openInterest', 0))) if not p_row.empty and pd.notna(p_row.iloc[0].get('open_interest', p_row.iloc[0].get('openInterest', 0))) else 0
+                        
+                        strike_analysis_data.append({
+                            'Strike': s,
+                            'Call Vol': c_vol,
+                            'Put Vol': p_vol,
+                            'Total Vol': c_vol + p_vol,
+                            'Net Flow (C - P)': c_vol - p_vol,
+                            'Call OI': c_oi,
+                            'Put OI': p_oi
+                        })
+                        
+                    strike_analysis_df = pd.DataFrame(strike_analysis_data)
+                    
+                    def style_strike_matrix(df):
+                        styles = pd.DataFrame('', index=df.index, columns=df.columns)
+                        for col in df.columns:
+                            if col == 'Strike':
+                                styles[col] = 'font-weight: bold; color: #f1c40f; text-align: center;'
+                            elif 'Call' in col:
+                                styles[col] = 'color: #2ecc71;'
+                            elif 'Put' in col:
+                                styles[col] = 'color: #e74c3c;'
+                        return styles
+
+                    styled_strike_df = strike_analysis_df.style.apply(style_strike_matrix, axis=None).format({
+                        'Strike': '{:.2f}',
+                        'Call Vol': '{:,}',
+                        'Put Vol': '{:,}',
+                        'Total Vol': '{:,}',
+                        'Net Flow (C - P)': '{:,}',
+                        'Call OI': '{:,}',
+                        'Put OI': '{:,}'
+                    }).bar(subset=['Net Flow (C - P)'], align='mid', color=['#e74c3c', '#2ecc71']).bar(subset=['Total Vol'], color='#3498db', vmin=0)
+
+                    # Removed fixed height here as well
+                    render_aggrid(strike_analysis_df, height=520, key="strike_flow_grid")
+
+                    # 3. Greeks & modeled dealer exposure (DEX/GEX)
+                    # IMPORTANT: exposure uses df_chain, i.e. the FULL Public chain for
+                    # this expiration, not the user-selected strike range.
+                    st.markdown("---")
+                    st.subheader("Greeks & Dealer Exposure — Full Expiration Chain")
+
+                    stock_data_for_spot = st.session_state.get("stock_data")
+                    spot_price = None
+                    if stock_data_for_spot is not None and not stock_data_for_spot.empty:
+                        try:
+                            spot_price = float(pd.to_numeric(stock_data_for_spot["Close"], errors="coerce").dropna().iloc[-1])
+                        except Exception:
+                            spot_price = None
+
+                    if spot_price is None or spot_price <= 0:
+                        st.warning("Unable to determine the latest underlying price, so DEX/GEX cannot be calculated.")
+                    else:
+                        exposure_df, gamma_flip = calculate_option_exposure(df_chain, spot_price)
+                        raw_delta = pd.to_numeric(df_chain.get("delta"), errors="coerce").fillna(0.0) if "delta" in df_chain else pd.Series(dtype=float)
+                        raw_gamma = pd.to_numeric(df_chain.get("gamma"), errors="coerce").fillna(0.0) if "gamma" in df_chain else pd.Series(dtype=float)
+                        raw_oi = pd.to_numeric(df_chain.get("openInterest"), errors="coerce").fillna(0.0) if "openInterest" in df_chain else pd.Series(dtype=float)
+                        if exposure_df.empty:
+                            st.warning("Public option-chain data does not contain enough OI/Greek fields to calculate DEX/GEX.")
+                        elif raw_delta.abs().sum() == 0 or raw_gamma.abs().sum() == 0 or raw_oi.sum() == 0:
+                            st.warning("Public returned the chain, but Delta/Gamma/Open Interest are zero or missing. The chain parser was updated to accept SDK and REST field variants; inspect the raw Public response if this warning persists.")
+                        else:
+                            positive_levels = exposure_df[exposure_df["Net GEX"] > 0]
+                            max_gex_row = positive_levels.loc[positive_levels["Net GEX"].idxmax()] if not positive_levels.empty else None
+                            mc1, mc2, mc3, mc4, mc5 = st.columns(5)
+                            mc1.metric("Underlying", f"${spot_price:,.2f}")
+                            mc2.metric("Net DEX", f"${exposure_df['Net DEX'].sum()/1_000_000:,.2f}M")
+                            mc3.metric("Net GEX", f"${exposure_df['Net GEX'].sum()/1_000_000:,.2f}M")
+                            mc4.metric("Largest +GEX Strike", f"${max_gex_row['Strike']:,.2f}" if max_gex_row is not None else "N/A")
+                            mc5.metric("Gamma Flip", f"${gamma_flip:,.2f}" if gamma_flip is not None else "N/A")
+
+                            display_cols = ["Strike", "Call OI", "Put OI", "Total OI", "Call DEX", "Put DEX", "Net DEX", "Call GEX", "Put GEX", "Net GEX"]
+                            exposure_display = exposure_millions(exposure_df[display_cols])
+                            render_aggrid(exposure_display, height=520, key="strike_exposure_grid")
+
+                            # Normalize plotted exposure fields explicitly. Public can return
+                            # numeric values as nullable/object fields even when the AG Grid displays them.
+                            # Grouped bars keep call/put exposure visible instead of visually canceling in a stack.
+                            dex_plot = exposure_millions(exposure_df).copy()
+                            gex_plot = exposure_millions(exposure_df).copy()
+                            for col in ["Strike", "Call DEX", "Put DEX", "Net DEX"]:
+                                dex_plot[col] = pd.to_numeric(dex_plot[col], errors="coerce")
+                            for col in ["Strike", "Call GEX", "Put GEX", "Net GEX"]:
+                                gex_plot[col] = pd.to_numeric(gex_plot[col], errors="coerce")
+                            dex_plot = dex_plot.dropna(subset=["Strike", "Call DEX", "Put DEX", "Net DEX"]).sort_values("Strike").reset_index(drop=True)
+                            gex_plot = gex_plot.dropna(subset=["Strike", "Call GEX", "Put GEX", "Net GEX"]).sort_values("Strike").reset_index(drop=True)
+
+                            def _bar_width_from_strikes(plot_df):
+                                if len(plot_df) < 2:
+                                    return None
+                                diffs = plot_df["Strike"].diff().dropna()
+                                diffs = diffs[diffs > 0]
+                                return float(diffs.median()) * 0.72 if not diffs.empty else None
+
+                            dex_width = _bar_width_from_strikes(dex_plot)
+                            gex_width = _bar_width_from_strikes(gex_plot)
+
+                            st.markdown("#### DEX by Strike")
+                            dex_fig = go.Figure()
+                            dex_fig.add_trace(go.Bar(x=dex_plot["Strike"].tolist(), y=dex_plot["Call DEX"].tolist(), name="Call DEX", width=dex_width, marker_color=["#2ecc71" if (v or 0) >= 0 else "#e74c3c" for v in dex_plot["Call DEX"].tolist()]))
+                            dex_fig.add_trace(go.Bar(x=dex_plot["Strike"].tolist(), y=dex_plot["Put DEX"].tolist(), name="Put DEX", width=dex_width, marker_color=["#2ecc71" if (v or 0) >= 0 else "#e74c3c" for v in dex_plot["Put DEX"].tolist()]))
+                            dex_fig.add_trace(go.Scatter(x=dex_plot["Strike"].tolist(), y=dex_plot["Net DEX"].tolist(), name="Net DEX", mode="lines+markers"))
+                            dex_fig.add_hline(y=0, line_width=1)
+                            dex_fig.add_vline(x=spot_price, line_dash="dash", annotation_text="Spot")
+                            dex_fig.update_layout(barmode="group", xaxis_title="Strike", yaxis_title="DEX ($M)", hovermode="x unified", height=520, xaxis_rangeslider_visible=False)
+                            st.plotly_chart(dex_fig, use_container_width=True)
+
+                            st.markdown("#### GEX by Strike")
+                            gex_fig = go.Figure()
+                            gex_fig.add_trace(go.Bar(x=gex_plot["Strike"].tolist(), y=gex_plot["Call GEX"].tolist(), name="Call GEX", width=gex_width, marker_color=["#2ecc71" if (v or 0) >= 0 else "#e74c3c" for v in gex_plot["Call GEX"].tolist()]))
+                            gex_fig.add_trace(go.Bar(x=gex_plot["Strike"].tolist(), y=gex_plot["Put GEX"].tolist(), name="Put GEX", width=gex_width, marker_color=["#2ecc71" if (v or 0) >= 0 else "#e74c3c" for v in gex_plot["Put GEX"].tolist()]))
+                            gex_fig.add_trace(go.Scatter(x=gex_plot["Strike"].tolist(), y=gex_plot["Net GEX"].tolist(), name="Net GEX", mode="lines+markers"))
+                            gex_fig.add_hline(y=0, line_width=1)
+                            gex_fig.add_vline(x=spot_price, line_dash="dash", annotation_text="Spot")
+                            if gamma_flip is not None:
+                                gex_fig.add_vline(x=gamma_flip, line_dash="dot", annotation_text="Gamma Flip")
+                            gex_fig.update_layout(barmode="group", xaxis_title="Strike", yaxis_title="GEX ($M)", hovermode="x unified", height=520, xaxis_rangeslider_visible=False)
+                            st.plotly_chart(gex_fig, use_container_width=True)
+
+                            st.markdown("#### Major Gamma Levels")
+                            positive_gex = exposure_df[exposure_df["Net GEX"] > 0].nlargest(5, "Net GEX")[['Strike', 'Net GEX']].copy()
+                            negative_gex = exposure_df[exposure_df["Net GEX"] < 0].nsmallest(5, "Net GEX")[['Strike', 'Net GEX']].copy()
+                            positive_gex = exposure_millions(positive_gex)
+                            negative_gex = exposure_millions(negative_gex)
+                            g1, g2 = st.columns(2)
+                            with g1:
+                                st.markdown("**Top 5 Positive Net GEX**")
+                                render_aggrid(positive_gex, height=240, key="positive_gamma_grid")
+                            with g2:
+                                st.markdown("**Top 5 Negative Net GEX**")
+                                render_aggrid(negative_gex, height=240, key="negative_gamma_grid")
+
+                            # ------------------------------------------------------------
+                            # Expiration Term Structure — every expiration uses its FULL
+                            # Public option chain. The strike filter above never enters
+                            # these calculations.
+                            # ------------------------------------------------------------
+                            st.markdown("---")
+                            st.subheader("Options Expiration Term Structure")
+                            st.caption("Current-session positioning is calculated independently from the full chain for every future expiration. GEX/DEX 1D changes are intentionally left blank until historical chain snapshots are available.")
+
+                            exp_count_col, exp_info_col = st.columns([1, 3])
+                            with exp_count_col:
+                                expiration_count = st.number_input(
+                                    "Expirations to Chart",
+                                    min_value=1,
+                                    max_value=min(30, len(sorted_expirations)),
+                                    value=min(8, len(sorted_expirations)),
+                                    step=1,
+                                    key="expiration_term_count",
+                                )
+                            with exp_info_col:
+                                st.caption(f"Showing the first {int(expiration_count)} available future expirations returned by Public.com.")
+
+                            selected_expirations = tuple(sorted_expirations[:int(expiration_count)])
+                            try:
+                                term_df, _term_chain_cache = get_expiration_term_structure(
+                                    st.session_state.get('ticker', 'N/A'),
+                                    selected_expirations,
+                                    spot_price,
+                                )
+                            except Exception as term_error:
+                                term_df = pd.DataFrame()
+                                st.error(f"Could not build expiration term structure: {term_error}")
+
+                            if term_df.empty:
+                                st.warning("No complete expiration-level Public chains were available for term-structure calculations.")
+                            else:
+                                total_gex = float(term_df["GEX"].sum())
+                                total_dex = float(term_df["DEX"].sum())
+                                total_oi = float(term_df["OI"].sum())
+                                tx1, tx2, tx3, tx4 = st.columns(4)
+                                tx1.metric("Tot. Exposure — GEX", f"{total_gex:,.0f}")
+                                tx2.metric("Tot. Exposure — DEX", f"{total_dex:,.0f}")
+                                tx3.metric("Tot. Exposure — OI", f"{total_oi:,.0f}")
+                                tx4.metric("Expirations", f"{len(term_df):,}")
+
+                                term_display = term_df[[
+                                    "Expiration Date", "DTE", "GEX", "DEX", "GEX Normalized", "DEX Normalized", "OI Normalized",
+                                    "GEX Change 1D", "DEX Change 1D", "Call Resistance", "Put Support", "High Vol. Level", "Expiry Expected Move",
+                                    "Expected Low", "Expected High"
+                                ]].copy()
+                                term_display["Expiration Date"] = pd.to_datetime(term_display["Expiration Date"]).dt.strftime("%m/%d/%y")
+                                term_display["Expiry Expected Move"] = term_display["Expiry Expected Move"].apply(lambda x: f"±${x:,.2f}" if pd.notna(x) else "N/A")
+                                term_display["Expected Low"] = term_display["Expected Low"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+                                term_display["Expected High"] = term_display["Expected High"].apply(lambda x: f"${x:,.2f}" if pd.notna(x) else "N/A")
+                                for col in ["GEX Change 1D", "DEX Change 1D"]:
+                                    term_display[col] = "—"
+
+                                term_display["GEX"] = pd.to_numeric(term_display["GEX"], errors="coerce") / 1_000_000.0
+                                term_display["DEX"] = pd.to_numeric(term_display["DEX"], errors="coerce") / 1_000_000.0
+                                term_display = term_display.rename(columns={
+                                    "GEX Normalized": "GEX %", "DEX Normalized": "DEX %", "OI Normalized": "OI %",
+                                })
+                                render_aggrid(
+                                    term_display,
+                                    height=620,
+                                    key="expiration_term_structure_grid",
+                                )
+
+                                # Normalize plotted fields explicitly so Public numeric/nullable
+                                # values always reach Plotly as real numeric arrays.
+                                term_plot = term_df.copy()
+                                term_plot["Expiration Date"] = pd.to_datetime(term_plot["Expiration Date"], errors="coerce")
+                                term_plot["GEX"] = pd.to_numeric(term_plot["GEX"], errors="coerce") / 1_000_000.0
+                                term_plot["DEX"] = pd.to_numeric(term_plot["DEX"], errors="coerce") / 1_000_000.0
+                                term_plot = term_plot.dropna(subset=["Expiration Date", "GEX", "DEX"]).sort_values("Expiration Date")
+                                ts_fig = go.Figure()
+                                ts_fig.add_trace(go.Bar(x=term_plot["Expiration Date"].tolist(), y=term_plot["GEX"].tolist(), name="GEX"))
+                                ts_fig.add_trace(go.Scatter(x=term_plot["Expiration Date"].tolist(), y=term_plot["DEX"].tolist(), name="DEX", mode="lines+markers", yaxis="y2"))
+                                ts_fig.update_layout(
+                                    title="GEX / DEX by Expiration",
+                                    xaxis_title="Expiration",
+                                    yaxis_title="GEX ($M)",
+                                    yaxis2=dict(title="DEX ($M)", overlaying="y", side="right"),
+                                    height=480,
+                                )
+                                st.plotly_chart(ts_fig, use_container_width=True)
+
+                    # 4. Contract Chart & Technical Deep Dive
+                    # 4. Contract Chart & Technical Deep Dive
+                    st.markdown("---")
+                    st.subheader("Contract Chart & Technical Deep Dive")
+                    
+                    cc1, cc2 = st.columns(2)
+                    with cc1:
+                        selected_strike = st.selectbox("Select Strike Price for Chart", options=strikes, key="chain_chart_strike")
+                    with cc2:
+                        selected_type = st.selectbox("Select Option Type", options=["call", "put"], key="chain_chart_type")
+
+                    if st.button("Fetch Contract History & Chart", key="load_chain_chart"):
+                        with st.spinner(f"Fetching history for {selected_type.upper()} @ ${selected_strike}..."):
+                            details, history_df = get_single_contract_details_free(
+                                st.session_state.get('ticker', 'N/A'), exp_date_str, selected_strike, selected_type
+                            )
                         
                         if details:
-                            st.subheader(f"Details for {details['symbol']} (as of yesterday's close)")
-                            # RESTORED these metrics
-                            c1, c2, c3, c4, c5 = st.columns(5)
-                            c1.metric("Close", f"${details['close']:.2f}" if isinstance(details['close'], (int, float)) else "N/A")
-                            c2.metric("Open", f"${details['open']:.2f}" if isinstance(details['open'], (int, float)) else "N/A")
-                            c3.metric("High", f"${details['high']:.2f}" if isinstance(details['high'], (int, float)) else "N/A")
-                            c4.metric("Low", f"${details['low']:.2f}" if isinstance(details['low'], (int, float)) else "N/A")
-                            c5.metric("Volume", f"{details['volume']:,}" if isinstance(details['volume'], (int, float)) else "N/A")
+                            st.subheader(f"Contract Snapshot — {details.get('symbol', 'Contract')} (Current Session)")
+                            dc1, dc2, dc3, dc4, dc5 = st.columns(5)
+                            dc1.metric("Last", f"${details['last']:.2f}" if isinstance(details.get('last'), (int, float)) else "N/A")
+                            dc2.metric("Bid", f"${details['bid']:.2f}" if isinstance(details.get('bid'), (int, float)) else "N/A")
+                            dc3.metric("Ask", f"${details['ask']:.2f}" if isinstance(details.get('ask'), (int, float)) else "N/A")
+                            dc4.metric("Volume", f"{details['volume']:,}" if isinstance(details.get('volume'), (int, float)) else "N/A")
+                            dc5.metric("Open Interest", f"{details.get('open_interest', 0):,}" if isinstance(details.get('open_interest'), (int, float)) else "N/A")
+                            gc1, gc2, gc3, gc4 = st.columns(4)
+                            gc1.metric("Delta", f"{details['delta']:.4f}" if isinstance(details.get('delta'), (int, float)) else "N/A")
+                            gc2.metric("Gamma", f"{details['gamma']:.6f}" if isinstance(details.get('gamma'), (int, float)) else "N/A")
+                            gc3.metric("IV", f"{details['iv']:.2%}" if isinstance(details.get('iv'), (int, float)) else "N/A")
+                            gc4.metric("Theta", f"{details['theta']:.4f}" if isinstance(details.get('theta'), (int, float)) else "N/A")
 
                         if history_df is not None and not history_df.empty:
-                            st.subheader(f"Contract Price History")
+                            history_df = history_df.copy().sort_values("Date").reset_index(drop=True)
+                            history_df["Date"] = pd.to_datetime(history_df["Date"]).dt.normalize()
                             y_min_hist, y_max_hist = history_df['Low'].min(), history_df['High'].max()
-                            
-                            # Both chart types now consume the exact same
-                            # normalized option-history DataFrame.
+
+                            st.subheader("Contract Price History")
                             if chart_type == 'Line':
-                                history_fig = go.Figure(
-                                    data=[
-                                        go.Scatter(
-                                            x=history_df['Date'].tolist(),
-                                            y=history_df['Close'].astype(float).tolist(),
-                                            mode='lines',
-                                            name='Close'
-                                        )
-                                    ]
-                                )
-                                history_fig.update_layout(
-                                    title_text=f"Price History for {details['symbol']}"
-                                )
+                                history_fig = go.Figure(data=[go.Scatter(
+                                    x=history_df['Date'].tolist(),
+                                    y=history_df['Close'].astype(float).tolist(),
+                                    mode='lines',
+                                    name='Close'
+                                )])
+                                history_fig.update_layout(title_text=f"Price History for {details.get('symbol', '')}")
                             else:
-                                history_fig = go.Figure(
-                                    data=[
-                                        go.Candlestick(
-                                            x=history_df['Date'].tolist(),
-                                            open=history_df['Open'].astype(float).tolist(),
-                                            high=history_df['High'].astype(float).tolist(),
-                                            low=history_df['Low'].astype(float).tolist(),
-                                            close=history_df['Close'].astype(float).tolist()
-                                        )
-                                    ]
-                                )
-                                history_fig.update_layout(
-                                    title_text=f"Price History for {details['symbol']}",
-                                    xaxis_rangeslider_visible=False
-                                )
-                                history_fig.update_xaxes(
-                                    rangebreaks=[dict(bounds=["sat", "mon"])],
-                                    rangeslider_visible=False
-                                )
-                            
+                                history_fig = go.Figure(data=[go.Candlestick(
+                                    x=history_df['Date'].tolist(),
+                                    open=history_df['Open'].astype(float).tolist(),
+                                    high=history_df['High'].astype(float).tolist(),
+                                    low=history_df['Low'].astype(float).tolist(),
+                                    close=history_df['Close'].astype(float).tolist()
+                                )])
+                                history_fig.update_layout(title_text=f"Price History for {details.get('symbol', '')}", xaxis_rangeslider_visible=False)
+                                history_fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
+
                             all_moon_events_hist = st.session_state.get('all_moon_events', [])
                             visible_moon_events_hist = []
                             if show_full_moon: visible_moon_events_hist.extend([e for e in all_moon_events_hist if e[1] == 'Full Moon'])
@@ -2074,7 +3043,7 @@ def main_app():
                             
                             options_analysis_results = []
                             if show_analysis and not history_df.empty:
-                                    history_fig, options_analysis_results = add_lunar_analysis_annotations(history_fig, history_df, visible_moon_events_hist, open_col='Open', high_col='High', low_col='Low', close_col='Close', y_max_total=y_max_hist)
+                                history_fig, options_analysis_results = add_lunar_analysis_annotations(history_fig, history_df, visible_moon_events_hist, open_col='Open', high_col='High', low_col='Low', close_col='Close', y_max_total=y_max_hist)
                             
                             if num_price_levels > 0 and options_analysis_results:
                                 history_fig = add_price_level_lines(history_fig, options_analysis_results, num_price_levels)
@@ -2085,11 +3054,10 @@ def main_app():
                             st.plotly_chart(history_fig, use_container_width=True)
 
                             if show_analysis and options_analysis_results:
-                                display_analysis_table(options_analysis_results)
+                                display_analysis_table(options_analysis_results, grid_key="lunar_cycle_analysis_grid_options")
                                 display_summary_and_active_cycle_stats(options_analysis_results)
-
-                        elif history_df is not None:
-                                st.info("No price history found for this contract.")
+                        else:
+                            st.info("No price history found for this contract.")
 
         # ------------------------------------------------------------
         # TradingView market widgets belong AFTER the chart + options
@@ -2311,11 +3279,11 @@ def main_app():
             end_date_input,
             get_all_contract_info_free,
             get_single_contract_details_free,
+            get_public_option_chain,
             chart_type
         )
 
 
-# --- APP ROUTING ---
-if __name__ == "__main__":
-    if check_login():
-        main_app()
+# --- APP ROUTING (NEW CODE) ---
+if check_login():
+    main_app()
