@@ -7,4 +7,4 @@ google-generativeai
 requests
 Pillow
 streamlit-aggrid
-public-api-sdk
+publicdotcom-py
