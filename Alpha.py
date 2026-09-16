@@ -41,21 +41,43 @@ except ImportError:
 st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", page_icon="🚀")
 st.markdown("""
 <style>
-/* Hide Streamlit footer */
+
+/* Normal Streamlit footer */
 footer {
-    visibility: hidden;
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
 }
 
-/* Hide the "Made with Streamlit" footer text */
-footer:after {
-    content: '';
-    visibility: hidden;
+/* Streamlit toolbar */
+[data-testid="stToolbar"] {
+    display: none !important;
+    visibility: hidden !important;
 }
 
-/* Hide the bottom decoration/bar */
+/* Streamlit decoration */
+[data-testid="stDecoration"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+/* Status widget */
+[data-testid="stStatusWidget"] {
+    display: none !important;
+    visibility: hidden !important;
+}
+
+/* Bottom container */
 [data-testid="stBottomBlockContainer"] {
-    display: none;
+    display: none !important;
+    visibility: hidden !important;
 }
+
+/* Header */
+header {
+    visibility: hidden !important;
+}
+
 </style>
 """, unsafe_allow_html=True)
 
