@@ -8,3 +8,4 @@ requests
 Pillow
 streamlit-aggrid
 publicdotcom-py
+bokeh
