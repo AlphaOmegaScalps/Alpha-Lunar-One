@@ -39,7 +39,18 @@ except ImportError:
 
 # --- Page Configuration (MUST be the first Streamlit command) ---
 st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", page_icon="🚀")
-
+st.markdown(
+    """
+    <style>
+    /* Hides the GitHub corner/fork link and Streamlit viewer badge */
+    #MainMenu {visibility: hidden;}
+    header {visibility: hidden;}
+    footer {visibility: hidden;}
+    .viewerBadge_container__1QSob {display: none !important;}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 # ==============================
 # PUBLIC.COM API — DEV SETTINGS
