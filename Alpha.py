@@ -86,10 +86,8 @@ def show_login_form():
 
         if submitted:
             # Check if the username exists and the password is correct
-            if (
-                username in st.secrets["credentials"]["usernames"]
-                and password == st.secrets["credentials"]["usernames"][username]["password"]
-            ):
+            if username in st.secrets["credentials"]["usernames"] and \
+               password == st.secrets["credentials"]["usernames"][username]["password"]:
                 
                 # If login is successful, set session state
                 st.session_state["logged_in"] = True
@@ -1690,6 +1688,7 @@ def display_eclipse_page(get_price_data_func=None, ticker=None, end_date=None, g
 
     st.markdown("### Eclipse research")
     st.caption("Historical eclipse price studies are exploratory and do not establish causation or a trading signal.")
+    render_eclipse_lunar_calendar_bokeh(ticker, st.session_state.get("stock_data"), end_date)
 
 def main_app():
 
@@ -1700,15 +1699,29 @@ def main_app():
     except (FileNotFoundError, KeyError):
         GOOGLE_API_KEY = ""
 
-    # Public is now the primary market-data source. Keep the existing Polygon
-    # key as a fallback so a Public/API configuration problem never destroys
-    # the existing Alpha workflow. Both credentials belong in Streamlit Secrets
-    # (.streamlit/secrets.toml) — never hardcoded in source.
-    try:
-        PUBLIC_API_SECRET = st.secrets["PUBLIC_API_SECRET"]
-    except (FileNotFoundError, KeyError):
-        PUBLIC_API_SECRET = ""
-        st.sidebar.warning("PUBLIC_API_SECRET is not set in secrets — Public.com data will be unavailable.")
+    # Public is user-supplied. The secret is kept only in this Streamlit session
+    # so each logged-in user can use their own Public.com API key. It is never
+    # read from application secrets and is never written to persistent state.
+    PUBLIC_API_SECRET = st.session_state.get("public_api_secret", "")
+    with st.sidebar.expander("Public.com API", expanded=not bool(PUBLIC_API_SECRET)):
+        st.caption("Enter your own Public.com API secret. It is used only for this browser session.")
+        entered_public_secret = st.text_input(
+            "Public API Secret",
+            value=PUBLIC_API_SECRET,
+            type="password",
+            key="public_api_secret_input",
+            help="Your Public.com secret is stored only in Streamlit session state for this session."
+        )
+        if entered_public_secret != PUBLIC_API_SECRET:
+            st.session_state["public_api_secret"] = entered_public_secret.strip()
+            PUBLIC_API_SECRET = st.session_state["public_api_secret"]
+            # Do not retain cached UI/data derived from another user's credential.
+            for _key in ("public_option_chain_cache", "public_connection_ok"):
+                st.session_state.pop(_key, None)
+        if PUBLIC_API_SECRET:
+            st.info("API secret entered. Public.com is queried only when a Public-backed feature is used.")
+        else:
+            st.warning("Enter a Public.com API secret to enable option-chain and option-history features.")
 
     try:
         POLYGON_API_KEY = st.secrets["POLYGON_API_KEY"]
@@ -1934,7 +1947,6 @@ def main_app():
         df["Adj Close"] = df["Close"].astype(float)
         return df.reset_index(drop=True)
 
-    @st.cache_data(ttl=5 * 60, show_spinner=False)
     def get_account_transactions(_public_account_id, start_date, end_date):
         """Pull every filled TRADE transaction for the account in [start_date, end_date].
 
@@ -2657,7 +2669,6 @@ def main_app():
             )
         return fig
 
-    @st.cache_data(ttl=600, show_spinner=False)
     def get_public_option_expirations(ticker):
         """Return Public option expirations using the official SDK first."""
         ticker = str(ticker).upper().strip()
@@ -2679,7 +2690,6 @@ def main_app():
         )
         return sorted(payload.get("expirations", []))
 
-    @st.cache_data(ttl=120, show_spinner=False)
     def get_public_option_chain(ticker, expiration):
         """Return a normalized dict-shaped option chain from Public SDK/REST."""
         ticker = str(ticker).upper().strip()
@@ -2818,7 +2828,6 @@ def main_app():
         return rows
 
 
-    @st.cache_data(ttl=600, show_spinner=False)
     def get_all_contract_info_free(ticker):
         """Return option expirations from Public.com only.
 
@@ -2837,7 +2846,6 @@ def main_app():
             st.error(f"Public option expiration lookup failed: {public_error}")
             return [], {}
 
-    @st.cache_data(ttl=30 * 60, show_spinner=False)
     def get_single_contract_details_free(ticker, expiration, strike, type, history_start=None, history_end=None):
         """Fetch an option contract and its option history from Public.com only.
 
@@ -2975,7 +2983,6 @@ def main_app():
 
         return exposure, gamma_flip
 
-    @st.cache_data(ttl=300, show_spinner=False)
     def get_expiration_term_structure(ticker, expirations, spot_price):
         """Build current-session positioning for the FULL Public chain at every expiration.
 
@@ -3088,6 +3095,299 @@ def main_app():
             result["DEX Change 1D"] = None
         return result, chain_cache
 
+
+    def render_eclipse_lunar_calendar_bokeh(ticker, price_df, end_date):
+        """Interactive Bokeh calendar combining eclipse events, lunar cycles and thirds."""
+        st.markdown("### Eclipse & Lunar Event Calendar")
+        st.caption("Historical event deltas use actual loaded price data. Future dates are event projections only; no future prices are invented.")
+        if not BOKEH_AVAILABLE:
+            st.error("Bokeh is not installed.")
+            return
+        if price_df is None or price_df.empty:
+            st.info("Load price data before opening the event calendar.")
+            return
+
+        prices = price_df.copy()
+        prices["Date"] = pd.to_datetime(prices["Date"], errors="coerce").dt.normalize()
+        prices = prices.dropna(subset=["Date", "Open", "Close"]).sort_values("Date").drop_duplicates("Date")
+        if prices.empty:
+            return
+        price_index = prices.set_index("Date")
+        first_date = price_index.index.min()
+        last_date = price_index.index.max()
+        future_end = max(pd.Timestamp(end_date).normalize() + pd.DateOffset(years=2), last_date)
+
+        def next_trade(d):
+            d = pd.Timestamp(d).normalize()
+            rows = price_index.loc[price_index.index >= d]
+            if rows.empty:
+                return None
+            return rows.index[0]
+
+        rows = []
+        # Eclipse history in the loaded price range.
+        eclipse_all = get_historical_eclipse_study_data(first_date, last_date)
+        for _, e in eclipse_all.iterrows():
+            td = next_trade(e["date"])
+            if td is None:
+                continue
+            r = price_index.loc[td]
+            rows.append({"date": pd.Timestamp(e["date"]), "trade_date": td, "event": f"{e['type']} {e['kind']}",
+                         "category": e["kind"], "cycle": f"Saros {int(e['saros'])}",
+                         "price": float(r["Open"]), "delta": None, "delta_pct": None, "status": "Historical"})
+
+        # Lunar events already generated by the application, plus projected lunar events.
+        lunar_events = list(st.session_state.get("all_moon_events", []))
+        seed_dates = [pd.Timestamp(x[0]).date() for x in lunar_events] or [first_date.date()]
+        cursor = min(seed_dates)
+        while cursor <= future_end.date():
+            try:
+                candidates = {
+                    ephem.next_full_moon(cursor).datetime().date(): "Full Moon",
+                    ephem.next_new_moon(cursor).datetime().date(): "New Moon",
+                    ephem.next_first_quarter_moon(cursor).datetime().date(): "Quarter Moon",
+                    ephem.next_last_quarter_moon(cursor).datetime().date(): "Quarter Moon",
+                }
+                d = min(candidates)
+                if d > future_end.date():
+                    break
+                if not any(pd.Timestamp(x[0]).date() == d for x in lunar_events):
+                    lunar_events.append((d, candidates[d], ""))
+                cursor = d + dt.timedelta(days=1)
+            except Exception:
+                break
+
+        lunar_events = sorted({(pd.Timestamp(x[0]).date(), x[1]) for x in lunar_events})
+        lunar_points = []
+        for d, event_type in lunar_events:
+            td = next_trade(d)
+            if td is None:
+                # Future events have no trade date/price yet.
+                lunar_points.append({"date": pd.Timestamp(d), "trade_date": pd.NaT, "event": event_type,
+                                     "category": "Lunar", "cycle": "Projected", "price": None,
+                                     "delta": None, "delta_pct": None, "status": "Future"})
+            else:
+                r = price_index.loc[td]
+                lunar_points.append({"date": pd.Timestamp(d), "trade_date": td, "event": event_type,
+                                     "category": "Lunar", "cycle": "Moon cycle", "price": float(r["Open"]),
+                                     "delta": None, "delta_pct": None, "status": "Historical"})
+        rows.extend(lunar_points)
+
+        events_df = pd.DataFrame(rows).drop_duplicates(subset=["date", "event", "category"]).sort_values("date")
+        if events_df.empty:
+            st.info("No event dates are available for the selected price range.")
+            return
+
+        # Same-category cycle deltas for historical events.
+        for category in events_df["category"].dropna().unique():
+            idx = events_df[(events_df["category"] == category) & events_df["trade_date"].notna()].index.tolist()
+            for pos in range(1, len(idx)):
+                prev_i, cur_i = idx[pos - 1], idx[pos]
+                prev_price = events_df.loc[prev_i, "price"]
+                cur_price = events_df.loc[cur_i, "price"]
+                if pd.notna(prev_price) and prev_price != 0:
+                    delta = float(cur_price - prev_price)
+                    events_df.loc[prev_i, "delta"] = delta
+                    events_df.loc[prev_i, "delta_pct"] = delta / float(prev_price) * 100
+
+        # Add 1/3 and 2/3 time-zone events between same-body eclipses.
+        third_rows = []
+        eclipse_hist = events_df[(events_df["category"].isin(["Solar", "Lunar"])) & events_df["trade_date"].notna()].copy()
+        for category in ["Solar", "Lunar"]:
+            seq = eclipse_hist[eclipse_hist["category"] == category].sort_values("date")
+            for i in range(len(seq) - 1):
+                a, b = seq.iloc[i], seq.iloc[i + 1]
+                span = b["date"] - a["date"]
+                for frac, label in [(1/3, "1/3 Cycle"), (2/3, "2/3 Cycle")]:
+                    d = a["date"] + span * frac
+                    td = next_trade(d)
+                    price = float(price_index.loc[td]["Open"]) if td is not None else None
+                    third_rows.append({"date": d, "trade_date": td, "event": label,
+                                       "category": category, "cycle": f"{a['date'].date()} → {b['date'].date()}",
+                                       "price": price, "delta": None, "delta_pct": None,
+                                       "status": "Historical" if td is not None else "Future"})
+        if third_rows:
+            events_df = pd.concat([events_df, pd.DataFrame(third_rows)], ignore_index=True).sort_values("date")
+
+        # Active cycle is the latest historical same-category interval without a completed successor.
+        latest_hist = events_df[events_df["status"] == "Historical"].sort_values("date")
+        active_label = "None"
+        active_delta = None
+        if not latest_hist.empty:
+            last_event = latest_hist.iloc[-1]
+            same = latest_hist[latest_hist["category"] == last_event["category"]]
+            if len(same) >= 2:
+                prev = same.iloc[-2]
+                active_label = f"{prev['category']} · {prev['date'].date()} → {last_event['date'].date()}"
+                if pd.notna(last_event.get("price")) and pd.notna(prev.get("price")) and float(prev["price"]):
+                    active_delta = float(last_event["price"]) - float(prev["price"])
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Events", f"{len(events_df):,}")
+        m2.metric("Active Cycle", active_label)
+        m3.metric("Active Delta", f"{active_delta:+.2f}" if active_delta is not None else "N/A")
+
+        display_df = events_df[["date", "event", "category", "cycle", "price", "delta", "delta_pct", "status"]].copy()
+        display_df["Date"] = display_df.pop("date").dt.strftime("%Y-%m-%d")
+        display_df = display_df.rename(columns={"event":"Event", "category":"Body", "cycle":"Cycle", "price":"Event Open",
+                                                "delta":"Delta ($)", "delta_pct":"Delta (%)", "status":"Status"})
+        display_df["Delta (%)"] = pd.to_numeric(display_df["Delta (%)"], errors="coerce").round(2)
+        display_df["Delta ($)"] = pd.to_numeric(display_df["Delta ($)"], errors="coerce").round(2)
+        display_df["Event Open"] = pd.to_numeric(display_df["Event Open"], errors="coerce").round(2)
+        render_aggrid(display_df, height=360, key="eclipse_lunar_calendar_grid")
+
+        plot_df = events_df.copy()
+        plot_df["plot_y"] = plot_df["price"].fillna(price_index["Close"].iloc[-1])
+        source = ColumnDataSource(plot_df)
+        fig = figure(x_axis_type="datetime", height=520, sizing_mode="stretch_width",
+                     title=f"{str(ticker).upper()} — Eclipse / Lunar Calendar")
+        fig.line(x=prices["Date"], y=prices["Close"], line_width=2, alpha=0.65, legend_label="Close")
+        fig.circle(x="date", y="plot_y", source=source, size=9, alpha=0.85,
+                   color="#f59e0b", legend_field="category")
+        hover = HoverTool(tooltips=[("Date", "@date{%F}"), ("Event", "@event"), ("Body", "@category"),
+                                    ("Cycle", "@cycle"), ("Price", "@price{0.00}"),
+                                    ("Delta", "@delta{0.00}"), ("Delta %", "@delta_pct{0.00}%"), ("Status", "@status")],
+                          formatters={"@date": "datetime"})
+        fig.add_tools(hover)
+        fig.legend.click_policy = "hide"
+        fig.xaxis.axis_label = "Date"
+        fig.yaxis.axis_label = "Price"
+        components.html(file_html(fig, CDN, title="Eclipse Lunar Calendar"), height=560, scrolling=False)
+
+        # Link the calendar to the currently active stock by making the selected event actionable.
+        selectable = events_df[events_df["category"].isin(["Solar", "Lunar"])].sort_values("date")
+        if not selectable.empty:
+            labels = [f"{r['date'].strftime('%Y-%m-%d')} · {r['event']}" for _, r in selectable.iterrows()]
+            choice = st.selectbox("Event → active stock", labels, key="calendar_event_link")
+            selected = selectable.iloc[labels.index(choice)]
+            st.info(f"Linked stock: **{str(ticker).upper()}** · {selected['event']} on {selected['date'].strftime('%Y-%m-%d')}")
+
+    def render_multi_asset_bokeh_comparison(default_ticker):
+        """Compare multiple loaded/requested assets on one normalized Bokeh chart."""
+        st.markdown("### Multi-Asset Bokeh Comparison")
+        if not BOKEH_AVAILABLE:
+            st.error("Bokeh is not installed.")
+            return
+        defaults = []
+        if default_ticker:
+            defaults.append(str(default_ticker).upper().strip())
+        symbols = st.multiselect("Add stocks / options / assets", sorted(set(defaults + ["SPY", "QQQ", "IWM", "DIA"])),
+                                 default=defaults or ["SPY", "QQQ"], key="algo_compare_symbols")
+        custom = st.text_input("Additional symbols (comma-separated)", key="algo_compare_custom")
+        if custom.strip():
+            symbols += [x.strip().upper() for x in custom.split(",") if x.strip()]
+        symbols = list(dict.fromkeys(symbols))
+        if not symbols:
+            st.info("Select at least one asset.")
+            return
+        start = st.date_input("Comparison start", value=st.session_state.get("start_date", dt.date.today() - dt.timedelta(days=365)), key="algo_compare_start")
+        end = st.date_input("Comparison end", value=st.session_state.get("end_date", dt.date.today()), key="algo_compare_end")
+        if start > end:
+            st.error("Comparison start must be on or before comparison end.")
+            return
+        normalize = st.checkbox("Normalize each series to 100 at first available close", value=True, key="algo_compare_normalize")
+        frames = {}
+        with st.spinner("Loading comparison assets..."):
+            for symbol in symbols:
+                try:
+                    d = get_price_data(symbol, start, end)
+                    if d is not None and not d.empty:
+                        d = d.copy(); d["Date"] = pd.to_datetime(d["Date"], errors="coerce").dt.normalize()
+                        d["Close"] = pd.to_numeric(d["Close"], errors="coerce")
+                        d = d.dropna(subset=["Date", "Close"]).sort_values("Date")
+                        if not d.empty:
+                            frames[symbol] = d[["Date", "Close"]]
+                except Exception as e:
+                    st.warning(f"{symbol}: {e}")
+        if not frames:
+            st.info("No comparison data was returned.")
+            return
+        fig = figure(x_axis_type="datetime", height=560, sizing_mode="stretch_width", title="Multi-Asset Performance")
+        for symbol, d in frames.items():
+            y = d["Close"] / float(d["Close"].iloc[0]) * 100 if normalize else d["Close"]
+            source = ColumnDataSource({"Date": d["Date"], "Value": y, "Close": d["Close"], "Symbol": [symbol] * len(d)})
+            fig.line("Date", "Value", source=source, line_width=2, legend_label=symbol)
+            fig.circle("Date", "Value", source=source, size=4, alpha=0.0,
+                       hover_alpha=1.0, legend_label=symbol)
+        fig.add_tools(HoverTool(tooltips=[("Asset", "@Symbol"), ("Date", "@Date{%F}"),
+                                          ("Value", "@Value{0.00}"), ("Close", "@Close{0.00}")],
+                                formatters={"@Date": "datetime"}, mode="vline"))
+        fig.legend.click_policy = "hide"
+        fig.yaxis.axis_label = "Normalized Performance (100 = start)" if normalize else "Price"
+        components.html(file_html(fig, CDN, title="Multi-Asset Comparison"), height=600, scrolling=False)
+
+    def display_0dte_analytics():
+        """Current-day / next available 0DTE option-chain analytics."""
+        st.markdown("### 0DTE Analytics")
+        st.caption("Transparent chain metrics: premium, spread, liquidity, Greeks, implied volatility, and scenario return. This view does not label an option as a 'good' trade.")
+        if not PUBLIC_API_SECRET:
+            st.info("Enter your Public.com API secret in the sidebar to load 0DTE chains.")
+            return
+        universe = st.multiselect("Major 0DTE underlyings", ["SPY", "QQQ", "IWM", "DIA", "SPX", "XSP"],
+                                  default=["SPY", "QQQ", "IWM"], key="zero_dte_universe")
+        strike_band = st.number_input("Strike band around spot (%)", min_value=0.5, max_value=25.0, value=5.0, step=0.5, key="zero_dte_band")
+        scenario_move = st.number_input("Underlying scenario move (%)", min_value=-20.0, max_value=20.0, value=2.0, step=0.5, key="zero_dte_scenario")
+        min_volume = st.number_input("Minimum volume", min_value=0, value=0, step=10, key="zero_dte_min_volume")
+        min_oi = st.number_input("Minimum open interest", min_value=0, value=0, step=10, key="zero_dte_min_oi")
+        if not universe:
+            st.info("Select at least one underlying.")
+            return
+
+        today = dt.date.today()
+        all_rows = []
+        status_rows = []
+        for ticker in universe:
+            try:
+                expirations = get_public_option_expirations(ticker)
+                zero = [x for x in expirations if str(x)[:10] == today.isoformat()]
+                chosen = zero[0] if zero else None
+                status_rows.append({"Asset": ticker, "Today": today.isoformat(), "0DTE Expiration": chosen or "No 0DTE returned"})
+                if not chosen:
+                    continue
+                chain = get_public_option_chain(ticker, chosen)
+                rows = _chain_contract_rows(chain)
+                # Use current underlying close as the spot reference when available.
+                spot_df = get_price_data(ticker, today - dt.timedelta(days=5), today)
+                spot = float(pd.to_numeric(spot_df["Close"], errors="coerce").dropna().iloc[-1]) if spot_df is not None and not spot_df.empty else None
+                for r in rows:
+                    if spot is not None and r.get("strike") is not None and abs(float(r["strike"]) - spot) / spot * 100 > strike_band:
+                        continue
+                    if r.get("volume", 0) < min_volume or r.get("openInterest", 0) < min_oi:
+                        continue
+                    bid, ask, last = r.get("bid"), r.get("ask"), r.get("last")
+                    mid = r.get("midPrice")
+                    if mid is None and bid is not None and ask is not None:
+                        mid = (float(bid) + float(ask)) / 2
+                    premium = float(mid) if mid is not None else (float(last) if last is not None else None)
+                    spread = (float(ask) - float(bid)) if bid is not None and ask is not None else None
+                    strike = r.get("strike")
+                    pct_to_strike = ((float(strike) / spot) - 1) * 100 if spot and strike is not None else None
+                    # Scenario return is a simple intrinsic-value-at-expiration sensitivity, not a forecast.
+                    scenario_spot = spot * (1 + scenario_move / 100) if spot else None
+                    intrinsic = None
+                    if scenario_spot is not None and strike is not None and r.get("type") in ("call", "put"):
+                        intrinsic = max(scenario_spot - float(strike), 0.0) if r["type"] == "call" else max(float(strike) - scenario_spot, 0.0)
+                    scenario_return = ((intrinsic - premium) / premium * 100) if premium and intrinsic is not None else None
+                    all_rows.append({"Asset": ticker, "Expiration": chosen, "Type": str(r.get("type", "")).upper(),
+                                     "Strike": strike, "Spot": spot, "Distance %": pct_to_strike, "Bid": bid, "Ask": ask,
+                                     "Mid": premium, "Spread": spread, "Volume": r.get("volume", 0), "OI": r.get("openInterest", 0),
+                                     "IV": r.get("iv"), "Delta": r.get("delta"), "Gamma": r.get("gamma"), "Theta": r.get("theta"),
+                                     "Scenario Return %": scenario_return, "Contract": r.get("symbol")})
+            except Exception as e:
+                status_rows.append({"Asset": ticker, "Today": today.isoformat(), "0DTE Expiration": f"Error: {e}"})
+
+        if status_rows:
+            st.dataframe(pd.DataFrame(status_rows), use_container_width=True, hide_index=True)
+        result = pd.DataFrame(all_rows)
+        if result.empty:
+            st.info("No current-day 0DTE chains were returned for the selected assets.")
+            return
+        result = result.sort_values(["Asset", "Type", "Strike"], na_position="last")
+        st.dataframe(result, use_container_width=True, hide_index=True, column_config={
+            "Distance %": st.column_config.NumberColumn(format="%.2f%%"),
+            "IV": st.column_config.NumberColumn(format="%.2f"),
+            "Scenario Return %": st.column_config.NumberColumn(format="%.2f%%"),
+        })
 
     def load_data(ticker, start_date, end_date):
         with st.spinner("Fetching stock data..."):
@@ -3624,29 +3924,14 @@ def main_app():
             relative_pct = pct - underlying_pct
             u4.metric("Option vs underlying", f"{relative_pct:+.2f} pts")
 
-        # Render the lunar option replay with the same real OHLC candlesticks
-        # used by the Eclipse option replay. The replay still advances from
-        # the master lunar playhead, so only candles available at/before the
-        # current replay date are shown.
-        if all(c in visible.columns for c in ["Open", "High", "Low", "Close"]):
-            fig = go.Figure(data=[go.Candlestick(
-                x=visible["Date"].tolist(),
-                open=pd.to_numeric(visible["Open"], errors="coerce").tolist(),
-                high=pd.to_numeric(visible["High"], errors="coerce").tolist(),
-                low=pd.to_numeric(visible["Low"], errors="coerce").tolist(),
-                close=pd.to_numeric(visible["Close"], errors="coerce").tolist(),
-                name=contract_label,
-            )])
-        else:
-            # Safe fallback when a historical source only supplies closes;
-            # do not fabricate OHLC values.
-            fig = go.Figure(data=[go.Scatter(
-                x=visible["Date"].tolist(),
-                y=pd.to_numeric(visible["Close"], errors="coerce").tolist(),
-                mode="lines+markers",
-                name=contract_label,
-                yaxis="y1",
-            )])
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=visible["Date"].tolist(),
+            y=visible["Close"].astype(float).tolist(),
+            mode="lines+markers",
+            name=contract_label,
+            yaxis="y1",
+        ))
         fig.add_hline(
             y=entry, line_dash="dash", line_color="#94a3b8",
             annotation_text=f"Option entry ${entry:.2f}", annotation_position="top left",
@@ -3668,7 +3953,6 @@ def main_app():
         layout_kwargs = dict(
             title=f"{contract_label} — lunar cycle replay · {visible.iloc[-1]['Date'].strftime('%Y-%m-%d')}",
             height=450, xaxis_title="Date", yaxis_title="Option premium (USD)",
-            xaxis_rangeslider_visible=False,
         )
         if compare_underlying and not underlying_visible.empty:
             layout_kwargs["yaxis2"] = dict(
@@ -4206,8 +4490,8 @@ def main_app():
     # above all three app tabs.
     display_top_tradingview_ticker_tape()
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
-        ["Charts & Options", "AI Analysis", "Market Heatmaps", "Eclipses", "Algo Trades"]
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
+        ["Charts & Options", "AI Analysis", "Market Heatmaps", "Eclipses", "Algo Trades", "0DTE Analytics"]
     )
 
     fig = None
@@ -5005,6 +5289,11 @@ def main_app():
 
     with tab5:
         display_algo_trade_replay()
+        st.markdown("---")
+        render_multi_asset_bokeh_comparison(st.session_state.get("ticker", current_ticker))
+
+    with tab6:
+        display_0dte_analytics()
 
 
 # --- APP ROUTING (NEW CODE) ---
