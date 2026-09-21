@@ -68,9 +68,42 @@ st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", pag
 # --- MAIN APPLICATION (YOUR ORIGINAL CODE MOVED INTO THIS FUNCTION) ---
 #_______________________________________________________________________#
 # --- USER AUTHENTICATION (NEW CODE) ---
+def set_login_background():
+    image_url = (
+        "https://raw.githubusercontent.com/"
+        "AlphaOmegaScalps/Alpha-Lunar-One/main/"
+        "login_background.jpg"
+    )
+
+    st.markdown(
+        f"""
+        <style>
+        [data-testid="stAppViewContainer"] {{
+            background:
+                linear-gradient(
+                    rgba(3, 8, 20, 0.45),
+                    rgba(3, 8, 20, 0.65)
+                ),
+                url("{image_url}");
+
+            background-size: cover;
+            background-position: center;
+            background-repeat: no-repeat;
+            background-attachment: fixed;
+        }}
+
+        [data-testid="stHeader"] {{
+            background: transparent;
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+
 def check_login():
     """Checks if the user is logged in."""
-    if not st.session_state.get("logged_in"):
+    if not st.session_state.get("logged_in", False):
+    set_login_background()
         # If not logged in, show the login form
         show_login_form()
         return False
