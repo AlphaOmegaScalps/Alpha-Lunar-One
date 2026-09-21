@@ -112,7 +112,7 @@ def check_login():
 def show_login_form():
     """Displays a login form."""
     with st.form("login_form"):
-        st.title("The Alpha Login")
+        st.title("Swell Labs")
         username = st.text_input("Username").lower()
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
