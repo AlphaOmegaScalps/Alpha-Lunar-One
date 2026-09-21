@@ -89,11 +89,34 @@ def set_login_background():
         + selected_background
     )
 
+    font_url = (
+        "https://raw.githubusercontent.com/"
+        "AlphaOmegaScalps/Alpha-Lunar-One/main/"
+        "BlackberryJamPersonalUse-rXOB.ttf"
+    )
 
-    # Background + Matrix animation CSS
     st.markdown(
         f"""
         <style>
+        /* Custom Blackberry Jam font */
+        @font-face {{
+            font-family: 'BlackberryJam';
+            src: url("{font_url}") format('truetype');
+            font-weight: normal;
+            font-style: normal;
+        }}
+
+        /* Login title styling */
+        .login-title {{
+            font-family: 'BlackberryJam', cursive !important;
+            font-size: 52px !important;
+            font-weight: normal !important;
+            text-align: center;
+            color: #ffffff;
+            letter-spacing: 1px;
+            text-shadow: 0 0 15px rgba(0, 255, 102, 0.25);
+        }}
+
         /* Background image */
         [data-testid="stAppViewContainer"] {{
             background: transparent;
@@ -121,45 +144,6 @@ def set_login_background():
         [data-testid="stHeader"] {{
             background: transparent;
         }}
-
-        /* Matrix animation overlay */
-        .matrix-rain {{
-            position: fixed;
-            inset: 0;
-            z-index: 1;
-            overflow: hidden;
-            pointer-events: none;
-            opacity: 0.22;
-            color: #00ff66;
-            font-family: monospace;
-            font-size: 14px;
-            line-height: 1.5;
-        }}
-
-        .matrix-column {{
-            position: absolute;
-            top: -100%;
-            white-space: pre;
-            writing-mode: vertical-rl;
-            text-shadow: 0 0 8px #00ff66;
-            animation: matrix-fall linear infinite;
-        }}
-
-        @keyframes matrix-fall {{
-            from {{
-                transform: translateY(-100%);
-            }}
-            to {{
-                transform: translateY(200vh);
-            }}
-        }}
-
-        /* Login form and app content above animation */
-        [data-testid="stMain"] {{
-            position: relative;
-            z-index: 2;
-        }}
-
         </style>
         """,
         unsafe_allow_html=True
@@ -177,11 +161,14 @@ def check_login():
 def show_login_form():
     """Displays a login form."""
     with st.form("login_form"):
-        st.title("Swell Labs")
+        st.markdown(
+            '<h1 class="login-title">Swell Labs</h1>',
+            unsafe_allow_html=True
+        )
+
         username = st.text_input("Username").lower()
         password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("Log in")
-
         if submitted:
             # Check if the username exists and the password is correct
             if username in st.secrets["credentials"]["usernames"] and \
