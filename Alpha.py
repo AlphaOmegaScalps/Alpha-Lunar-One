@@ -103,7 +103,7 @@ def set_login_background():
 def check_login():
     """Checks if the user is logged in."""
     if not st.session_state.get("logged_in", False):
-    set_login_background()
+        set_login_background()
         # If not logged in, show the login form
         show_login_form()
         return False
