@@ -4415,6 +4415,63 @@ def main_app():
 
     apply_professional_theme()
 
+    # Bloomberg-inspired compact terminal layer. CSS-only: preserves all app logic,
+    # algorithms, widgets, data sources, and existing tab structure.
+    st.markdown("""
+    <style>
+      :root {
+        --alpha-bg: #05070a;
+        --alpha-panel: #0b0e13;
+        --alpha-panel-2: #10141b;
+        --alpha-border: #252b34;
+        --alpha-text: #d7dde5;
+        --alpha-muted: #8993a2;
+        --alpha-accent: #f0a51b;
+      }
+      .stApp { background: #05070a; color: var(--alpha-text); }
+      [data-testid="stHeader"] { background: rgba(5,7,10,.96); }
+      [data-testid="stMainBlockContainer"] {
+        max-width: 100%; padding: .55rem .75rem 1rem !important;
+      }
+      [data-testid="stSidebar"] { min-width: 230px; max-width: 260px; }
+      [data-testid="stSidebar"] > div { padding-top: .6rem; }
+      h1 { font-size: 1.45rem !important; margin: .15rem 0 .45rem !important; }
+      h2 { font-size: 1.15rem !important; margin: .2rem 0 .35rem !important; }
+      h3 { font-size: .98rem !important; margin: .15rem 0 .3rem !important; }
+      p { margin-bottom: .35rem; }
+      [data-testid="stVerticalBlock"] { gap: .55rem; }
+      [data-testid="stHorizontalBlock"] { gap: .55rem; }
+      [data-testid="stTabs"] [role="tablist"] { gap: 2px; border-bottom: 1px solid var(--alpha-border); }
+      [data-testid="stTabs"] button[role="tab"] {
+        padding: .38rem .72rem; min-height: 2rem; font-size: .82rem;
+        border-radius: 2px 2px 0 0; color: #aeb7c4;
+      }
+      [data-testid="stTabs"] button[aria-selected="true"] {
+        color: #ffbd36; border-bottom: 2px solid #f0a51b;
+      }
+      [data-testid="stMetric"] {
+        background: var(--alpha-panel); border: 1px solid var(--alpha-border);
+        border-radius: 2px; padding: .45rem .6rem;
+      }
+      [data-testid="stMetricLabel"] { font-size: .72rem; }
+      [data-testid="stMetricValue"] { font-size: 1.25rem; }
+      [data-testid="stDataFrame"], [data-testid="stTable"] {
+        border: 1px solid var(--alpha-border); border-radius: 2px;
+      }
+      div[data-baseweb="select"] > div, div[data-baseweb="input"] > div,
+      textarea, .stButton button { border-radius: 2px !important; }
+      .stButton button { min-height: 1.9rem; padding: .25rem .55rem; }
+      hr { margin: .65rem 0; border-color: var(--alpha-border); }
+      [data-testid="stExpander"] { border: 1px solid var(--alpha-border); border-radius: 2px; }
+      [data-testid="stAlert"] { padding: .45rem .65rem; border-radius: 2px; }
+      /* Reduce default blank space while allowing charts/tables to retain their size. */
+      [data-testid="stElementContainer"] { margin-bottom: 0 !important; }
+      @media (min-width: 1500px) {
+        [data-testid="stMainBlockContainer"] { padding-left: 1rem !important; padding-right: 1rem !important; }
+      }
+    </style>
+    """, unsafe_allow_html=True)
+
     # --- Streamlit App UI ---
     # Define a safe current ticker before rendering the hero. The sidebar
     # input is created below, so referencing ticker_input here would raise
