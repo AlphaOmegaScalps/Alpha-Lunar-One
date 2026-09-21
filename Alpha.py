@@ -14,7 +14,8 @@ import base64
 import json
 import re
 import streamlit.components.v1 as components
-import requests
+import requests]
+import random
 
 # Bokeh is used by the Algo Trades event-driven replay.
 try:
@@ -69,10 +70,23 @@ st.set_page_config(page_title="Swell Labs: Alpha Tool Suite", layout="wide", pag
 #_______________________________________________________________________#
 # --- USER AUTHENTICATION (NEW CODE) ---
 def set_login_background():
+    backgrounds = [
+        "login_background.jpg",
+        "login_background2.jpg",
+        "login_background3.jpg",
+        "login_background4.jpg",
+    ]
+
+    # Select once per Streamlit session
+    if "login_background" not in st.session_state:
+        st.session_state.login_background = random.choice(backgrounds)
+
+    selected_background = st.session_state.login_background
+
     image_url = (
         "https://raw.githubusercontent.com/"
         "AlphaOmegaScalps/Alpha-Lunar-One/main/"
-        "login_background.jpg"
+        + selected_background
     )
 
     st.markdown(
@@ -99,7 +113,6 @@ def set_login_background():
         """,
         unsafe_allow_html=True
     )
-
 def check_login():
     """Checks if the user is logged in."""
     if not st.session_state.get("logged_in", False):
