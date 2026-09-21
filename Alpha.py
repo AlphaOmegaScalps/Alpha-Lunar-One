@@ -89,10 +89,22 @@ def set_login_background():
         + selected_background
     )
 
+
+    # Background + Matrix animation CSS
     st.markdown(
         f"""
         <style>
+        /* Background image */
         [data-testid="stAppViewContainer"] {{
+            background: transparent;
+        }}
+
+        [data-testid="stAppViewContainer"]::before {{
+            content: "";
+            position: fixed;
+            inset: 0;
+            z-index: 0;
+
             background:
                 linear-gradient(
                     rgba(3, 8, 20, 0.45),
@@ -109,10 +121,50 @@ def set_login_background():
         [data-testid="stHeader"] {{
             background: transparent;
         }}
+
+        /* Matrix animation overlay */
+        .matrix-rain {{
+            position: fixed;
+            inset: 0;
+            z-index: 1;
+            overflow: hidden;
+            pointer-events: none;
+            opacity: 0.22;
+            color: #00ff66;
+            font-family: monospace;
+            font-size: 14px;
+            line-height: 1.5;
+        }}
+
+        .matrix-column {{
+            position: absolute;
+            top: -100%;
+            white-space: pre;
+            writing-mode: vertical-rl;
+            text-shadow: 0 0 8px #00ff66;
+            animation: matrix-fall linear infinite;
+        }}
+
+        @keyframes matrix-fall {{
+            from {{
+                transform: translateY(-100%);
+            }}
+            to {{
+                transform: translateY(200vh);
+            }}
+        }}
+
+        /* Login form and app content above animation */
+        [data-testid="stMain"] {{
+            position: relative;
+            z-index: 2;
+        }}
+
         </style>
         """,
         unsafe_allow_html=True
     )
+    
 def check_login():
     """Checks if the user is logged in."""
     if not st.session_state.get("logged_in", False):
