@@ -14,7 +14,7 @@ import base64
 import json
 import re
 import streamlit.components.v1 as components
-import requests]
+import requests
 import random
 
 # Bokeh is used by the Algo Trades event-driven replay.
