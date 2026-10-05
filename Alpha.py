@@ -5610,4 +5610,4 @@ def main_app():
 
 # --- APP ROUTING (NEW CODE) ---
 if check_login():
-    main_app(
+    main_app()
