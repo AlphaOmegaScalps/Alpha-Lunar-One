@@ -3923,31 +3923,12 @@ def main_app():
         labels, windows, rows = [], [], []
         min_date, max_date = price["Date"].min(), price["Date"].max()
         for _, row in replay_df.iterrows():
-            status = str(row.get("status", "")).strip().lower()
             start = max(row["start_date"], min_date)
             end = min(row["end_date"], max_date)
-
-            # Active/in-progress cycles are different from completed cycles:
-            # the projected astronomical end date can be in the future, while
-            # the price feed only reaches today's session. In that case the
-            # replay MUST remain open through the latest real candle. This is
-            # especially important when the new cycle begins today after a
-            # weekend/non-trading-day moon event (e.g. Monday 10/05/2026).
-            if status in {"in progress", "active", "open"}:
-                end = max_date
-
-            if end < start:
+            if end <= start:
                 continue
-
             window = price[(price["Date"] >= start) & (price["Date"] <= end)].reset_index(drop=True)
-
-            # A brand-new active cycle can legitimately contain exactly one
-            # trading candle (today's OPEN/current candle). Completed cycles
-            # still need at least two candles to be replayable.
-            if status in {"in progress", "active", "open"}:
-                if window.empty:
-                    continue
-            elif len(window) < 2:
+            if len(window) < 2:
                 continue
             labels.append(
                 f"{row.get('start_event_type', 'Lunar cycle')} · "
@@ -4117,10 +4098,12 @@ def main_app():
                 "The option replay stops here; the underlying may continue in its own replay."
             )
 
-        # Hypothetical entry is always the first available option candle in the selected
-        # replay window. All statistics below are calculated from actual option candles only.
+        # Entry is the OPEN of the first real option candle in the replay window.
+        # Do NOT use the first Close here: for a 0DTE contract the first daily
+        # candle can contain the entire day's move (e.g. $0.09 open -> $4.35 close),
+        # and using Close would incorrectly make the current premium the entry.
         entry_date = pd.Timestamp(visible.iloc[0]["Date"])
-        entry = float(visible.iloc[0]["Close"])
+        entry = float(visible.iloc[0]["Open"])
         current = float(visible.iloc[-1]["Close"])
         pl = current - entry
         pct = (pl / entry) * 100 if entry else 0.0
@@ -4159,7 +4142,7 @@ def main_app():
         c5.metric("Max profit", f"${max_profit:+.2f}")
         c6.metric("Max drawdown", f"${max_drawdown:+.2f}")
 
-        st.markdown(f"**Hypothetical entry date:** {entry_date.strftime('%Y-%m-%d')} at ${entry:.2f} premium")
+        st.markdown(f"**Cycle entry:** {entry_date.strftime('%Y-%m-%d')} at the option OPEN ${entry:.2f} premium")
 
         if compare_underlying and underlying_entry is not None:
             u1, u2, u3, u4 = st.columns(4)
@@ -4169,14 +4152,18 @@ def main_app():
             relative_pct = pct - underlying_pct
             u4.metric("Option vs underlying", f"{relative_pct:+.2f} pts")
 
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(
+        # Show the actual OHLC candle(s), not just Close-to-Close points.
+        # This is especially important for 0DTE: a single daily candle can
+        # contain the entire open -> high/low -> current/close move.
+        fig = go.Figure(data=[go.Candlestick(
             x=visible["Date"].tolist(),
-            y=visible["Close"].astype(float).tolist(),
-            mode="lines+markers",
+            open=visible["Open"].astype(float).tolist(),
+            high=visible["High"].astype(float).tolist(),
+            low=visible["Low"].astype(float).tolist(),
+            close=visible["Close"].astype(float).tolist(),
             name=contract_label,
             yaxis="y1",
-        ))
+        )])
         fig.add_hline(
             y=entry, line_dash="dash", line_color="#94a3b8",
             annotation_text=f"Option entry ${entry:.2f}", annotation_position="top left",
