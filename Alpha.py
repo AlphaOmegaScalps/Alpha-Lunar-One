@@ -2161,6 +2161,37 @@ def main_app():
             return "TEN_YEARS"
         return "ALL"
 
+    def _public_intraday_bars_to_ohlcv(payload, start_date=None, end_date=None):
+        """Normalize Public intraday bars while preserving the candle timestamp."""
+        bars = payload.get("regularMarket", {}).get("bars", [])
+        rows = []
+        for bar in bars:
+            ts = pd.to_datetime(bar.get("timestamp"), utc=True, errors="coerce") if bar.get("timestamp") else pd.NaT
+            if pd.notna(ts):
+                ts = ts.tz_convert(None)
+            rows.append({
+                "Date": ts,
+                "Open": bar.get("open"),
+                "High": bar.get("high"),
+                "Low": bar.get("low"),
+                "Close": bar.get("close"),
+                "Volume": bar.get("volume", 0),
+            })
+        df = pd.DataFrame(rows, columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        if df.empty:
+            return pd.DataFrame(columns=["Date", "Open", "High", "Low", "Close", "Volume"])
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+        df = (df.dropna(subset=["Date", "Open", "High", "Low", "Close"])
+                .sort_values("Date").drop_duplicates("Date", keep="last").reset_index(drop=True))
+        if start_date is not None:
+            df = df[df["Date"] >= pd.Timestamp(start_date)]
+        if end_date is not None:
+            # Include the entire end date rather than stopping at midnight.
+            end_ts = pd.Timestamp(end_date).normalize() + pd.Timedelta(days=1)
+            df = df[df["Date"] < end_ts]
+        return df.reset_index(drop=True)
+
     def _public_bars_to_ohlcv(payload, start_date=None, end_date=None):
         """Normalize Public bars v2 into Alpha's canonical OHLCV schema."""
         bars = payload.get("regularMarket", {}).get("bars", [])
@@ -2920,6 +2951,48 @@ def main_app():
             )
         return fig
 
+    def add_option_cycle_entry_levels(fig, option_df, analysis_results, max_levels=6):
+        """Overlay actual option-candle entry levels for the lunar cycle starts."""
+        if fig is None or option_df is None or option_df.empty or not analysis_results:
+            return fig
+        work = option_df.copy()
+        work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
+        work["Open"] = pd.to_numeric(work.get("Open"), errors="coerce")
+        work = work.dropna(subset=["Date", "Open"]).sort_values("Date")
+        if work.empty:
+            return fig
+        color_map = {
+            "red": "rgba(255, 80, 80, 0.75)",
+            "blue": "rgba(80, 80, 255, 0.75)",
+            "green": "rgba(0, 200, 0, 0.70)",
+        }
+        rows = list(analysis_results)[-max_levels:]
+        used = set()
+        for row in rows:
+            start = pd.Timestamp(row.get("start_date")).normalize() if row.get("start_date") is not None else None
+            if start is None or pd.isna(start):
+                continue
+            future = work[work["Date"].dt.normalize() >= start]
+            if future.empty:
+                continue
+            candle = future.iloc[0]
+            entry_ts = pd.Timestamp(candle["Date"])
+            entry = float(candle["Open"])
+            key = round(entry, 10)
+            if key in used:
+                continue
+            used.add(key)
+            event_type = row.get("start_event_type", "Lunar")
+            color = color_map.get(row.get("start_event_color"), "rgba(148, 163, 184, 0.75)")
+            suffix = " (ACTIVE)" if row.get("status") == "In Progress" else ""
+            fig.add_hline(
+                y=entry, line_dash="dash", line_color=color, line_width=1.4,
+                annotation_text=f"{event_type} entry ${entry:.2f}{suffix}",
+                annotation_position="bottom right",
+                annotation_font=dict(color=color, size=11),
+            )
+        return fig
+
     def get_public_option_expirations(ticker):
         """Return Public option expirations using the official SDK first."""
         ticker = str(ticker).upper().strip()
@@ -3159,6 +3232,55 @@ def main_app():
             st.error(f"Public option data lookup failed: {public_error}")
             return None, None
 
+
+    @st.cache_data(ttl=60, show_spinner=False)
+    def get_option_intraday_history_free(ticker, expiration, strike, option_type):
+        """Fetch today's real intraday candles for one selected option contract.
+
+        This is intentionally limited to the current trading day so the 0DTE
+        action chart stays fast and does not turn into a second long-term chart.
+        """
+        if not PUBLIC_API_SECRET:
+            return pd.DataFrame()
+        try:
+            chain = get_public_option_chain(ticker, expiration)
+            rows = _chain_contract_rows(chain)
+            matches = [
+                r for r in rows
+                if str(r.get("type", "")).lower() == str(option_type).lower()
+                and r.get("strike") is not None
+                and abs(float(r["strike"]) - float(strike)) < 1e-9
+            ]
+            if not matches or not matches[0].get("symbol"):
+                return pd.DataFrame()
+            option_ticker = matches[0]["symbol"]
+            today = dt.date.today()
+            payload = public_request(
+                "GET",
+                f"/userapigateway/historicdata/OPTION/{option_ticker}/INTRADAY",
+                params={"tradingSessionToggle": "REGULAR_HOURS"},
+            )
+            return _public_intraday_bars_to_ohlcv(payload, today, today)
+        except Exception:
+            # Intraday availability can vary by contract/session. The caller
+            # should fall back to the existing daily contract chart gracefully.
+            return pd.DataFrame()
+
+    def _resample_intraday_ohlcv(df, minutes):
+        """Resample real intraday candles to 1/5/15-minute display candles."""
+        if df is None or df.empty:
+            return pd.DataFrame()
+        work = df.copy()
+        work["Date"] = pd.to_datetime(work["Date"], errors="coerce")
+        work = work.dropna(subset=["Date"]).sort_values("Date").set_index("Date")
+        for col in ["Open", "High", "Low", "Close", "Volume"]:
+            work[col] = pd.to_numeric(work[col], errors="coerce")
+        rule = f"{int(minutes)}min"
+        out = work.resample(rule, origin="start_day").agg({
+            "Open": "first", "High": "max", "Low": "min",
+            "Close": "last", "Volume": "sum"
+        }).dropna(subset=["Open", "High", "Low", "Close"]).reset_index()
+        return out
 
     def calculate_option_exposure(df_chain, spot_price, contract_multiplier=100):
         """Calculate modeled dealer-style DEX/GEX exposure by strike.
@@ -3575,14 +3697,31 @@ def main_app():
                         "event_color": event_color,
                         "moon_date": event_date
                     })
-        
-        if len(cycle_points) < 2:
-            return fig, []
 
-        # Process completed cycles
+        cycle_points.sort(key=lambda p: p['trading_row'].name)
+
+        # IMPORTANT: an astronomical event is a boundary, not a trading candle.
+        # The new cycle starts at the OPEN of the first trading session on/after
+        # the event. The prior cycle ends on the CLOSE of the last trading session
+        # before that new-cycle session. This is what keeps weekend/non-trading-day
+        # events from incorrectly extending the prior cycle into Monday.
+        def previous_trading_row(target_name, price_df):
+            target_name = pd.Timestamp(target_name).normalize()
+            prior = price_df.loc[price_df.index < target_name]
+            return prior.iloc[-1] if not prior.empty else None
+
+        if len(cycle_points) < 2:
+            # A single event can still be the beginning of today's active cycle.
+            if not cycle_points:
+                return fig, []
+
+        # Process completed cycles. Each successor event closes the prior cycle
+        # on the immediately preceding trading session.
         for i in range(len(cycle_points) - 1):
             start_day_data = cycle_points[i]['trading_row']
-            end_day_data = cycle_points[i+1]['trading_row']
+            end_day_data = previous_trading_row(cycle_points[i+1]['trading_row'].name, df_indexed)
+            if end_day_data is None or end_day_data.name < start_day_data.name:
+                continue
             
             entry_price = start_day_data[open_col]
             final_close_price = end_day_data[close_col]
@@ -3626,12 +3765,14 @@ def main_app():
                 borderwidth=0, borderpad=1,
             )
             
-        # Process the in-progress cycle
+        # Process the in-progress cycle.  Use <= so a cycle that begins today
+        # (including a weekend event whose first trading session is Monday) is
+        # immediately registered at today's OPEN.
         last_cycle_point = cycle_points[-1]
         start_day_data = last_cycle_point['trading_row']
         current_day_data = df_indexed.iloc[-1]
         
-        if start_day_data.name < current_day_data.name:
+        if start_day_data.name <= current_day_data.name:
             entry_price = start_day_data[open_col]
             
             cycle_df = df_indexed.loc[start_day_data.name:current_day_data.name]
@@ -4771,12 +4912,98 @@ def main_app():
                 lunar_contract_fig = add_option_lunar_overlays(
                     lunar_contract_fig, lunar_history, option_chart_events
                 )
+                if show_analysis and stock_analysis_results:
+                    lunar_contract_fig = add_option_cycle_entry_levels(
+                        lunar_contract_fig, lunar_history, stock_analysis_results
+                    )
                 lunar_contract_fig.update_layout(
                     title=f"{lunar_details.get('symbol', 'Option')} Contract Price History" if lunar_details else "Contract Price History",
                     xaxis_rangeslider_visible=False, height=450,
                 )
                 lunar_contract_fig.update_xaxes(rangebreaks=[dict(bounds=["sat", "mon"])], rangeslider_visible=False)
                 st.plotly_chart(lunar_contract_fig, use_container_width=True, key="lunar_selected_contract_chart")
+
+                # 0DTE gets a separate actionable intraday chart. The existing
+                # daily/overview contract chart above remains unchanged for
+                # weeklies and longer expirations.
+                try:
+                    selected_expiration_date = pd.Timestamp(lunar_exp_date).date()
+                    today_for_intraday = dt.date.today()
+                except Exception:
+                    selected_expiration_date = None
+                    today_for_intraday = dt.date.today()
+
+                if selected_expiration_date == today_for_intraday:
+                    st.markdown("#### 0DTE Action Chart")
+                    st.caption(
+                        "Intraday view for today's expiration. This chart stays focused on today's session so the cycle entry and current price action are immediately visible."
+                    )
+                    intraday_minutes = st.selectbox(
+                        "Intraday candles", [1, 5, 15], index=1,
+                        key="lunar_0dte_intraday_minutes",
+                        format_func=lambda x: f"{x}-minute"
+                    )
+                    with st.spinner("Loading today's 0DTE intraday candles..."):
+                        intraday_history = get_option_intraday_history_free(
+                            st.session_state.get('ticker', 'N/A'),
+                            lunar_exp_date,
+                            float(st.session_state.get('lunar_selected_option_strike', lunar_selected_strike)),
+                            st.session_state.get('lunar_selected_option_type', lunar_selected_type),
+                        )
+                    intraday_history = _resample_intraday_ohlcv(intraday_history, intraday_minutes)
+
+                    if intraday_history is not None and not intraday_history.empty:
+                        intraday_fig = go.Figure(data=[go.Candlestick(
+                            x=intraday_history["Date"].tolist(),
+                            open=intraday_history["Open"].astype(float).tolist(),
+                            high=intraday_history["High"].astype(float).tolist(),
+                            low=intraday_history["Low"].astype(float).tolist(),
+                            close=intraday_history["Close"].astype(float).tolist(),
+                            name=lunar_details.get('symbol', '0DTE') if lunar_details else '0DTE',
+                        )])
+
+                        # The active cycle must be the entry reference for today's
+                        # 0DTE chart. Use the first real intraday OPEN, not a daily
+                        # close and not an invented value.
+                        active_cycle = next(
+                            (r for r in reversed(stock_analysis_results) if r.get("status") == "In Progress"),
+                            None,
+                        ) if show_analysis else None
+                        if active_cycle:
+                            cycle_start = pd.Timestamp(active_cycle["start_date"]).normalize()
+                            day_bars = intraday_history[
+                                intraday_history["Date"].dt.normalize() >= cycle_start
+                            ]
+                            if not day_bars.empty:
+                                cycle_entry = float(day_bars.iloc[0]["Open"])
+                                event_name = active_cycle.get("start_event_type", "Lunar")
+                                intraday_fig.add_hline(
+                                    y=cycle_entry, line_dash="dash", line_color="#22c55e",
+                                    line_width=2,
+                                    annotation_text=f"{event_name} cycle entry ${cycle_entry:.2f}",
+                                    annotation_position="top left",
+                                    annotation_font=dict(color="#22c55e", size=12),
+                                )
+                                st.metric(
+                                    "Cycle entry (0DTE open)",
+                                    f"${cycle_entry:.2f}",
+                                    f"{(float(day_bars.iloc[-1]['Close']) - cycle_entry):+.2f}",
+                                )
+
+                        intraday_fig.update_layout(
+                            title=f"{lunar_details.get('symbol', '0DTE')} — Today's Intraday Action",
+                            height=500, xaxis_title="Time", yaxis_title="Premium (USD)",
+                            xaxis_rangeslider_visible=False,
+                        )
+                        intraday_fig.update_xaxes(rangeslider_visible=False)
+                        st.plotly_chart(
+                            intraday_fig, use_container_width=True, key="lunar_0dte_intraday_chart"
+                        )
+                    else:
+                        st.info(
+                            "No intraday bars were returned for this 0DTE contract yet. "
+                            "The normal contract overview above remains available."
+                        )
 
         if show_analysis and stock_analysis_results:
             display_analysis_table(stock_analysis_results, grid_key="lunar_cycle_analysis_grid_stock")
@@ -5383,4 +5610,4 @@ def main_app():
 
 # --- APP ROUTING (NEW CODE) ---
 if check_login():
-    main_app()
+    main_app(
