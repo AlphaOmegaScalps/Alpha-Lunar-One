@@ -3925,10 +3925,29 @@ def main_app():
         for _, row in replay_df.iterrows():
             start = max(row["start_date"], min_date)
             end = min(row["end_date"], max_date)
-            if end <= start:
+
+            # ACTIVE / IN-PROGRESS CYCLES ARE SPECIAL:
+            # The astronomical event can occur today (or on a weekend), so the
+            # projected end date may be in the future.  After clipping that
+            # projected date to the available market history, end can equal
+            # start on the very first trading day of the new cycle.  That is
+            # still a valid replay and must NOT be discarded.  In that case
+            # replay through the latest real candle available.
+            status_text = str(row.get("status", "")).strip().lower()
+            is_active = status_text in {"in progress", "active", "open", "current"}
+            if is_active:
+                if start > max_date:
+                    continue
+                end = max(end, start)
+                end = min(max(end, max_date), max_date)
+            elif end <= start:
                 continue
+
             window = price[(price["Date"] >= start) & (price["Date"] <= end)].reset_index(drop=True)
-            if len(window) < 2:
+            # Completed cycles need at least an entry and an exit session.
+            # Active cycles are allowed to contain exactly one trading candle
+            # because today's OPEN is the valid cycle entry.
+            if len(window) < (1 if is_active else 2):
                 continue
             labels.append(
                 f"{row.get('start_event_type', 'Lunar cycle')} · "
